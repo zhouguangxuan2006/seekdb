@@ -76,6 +76,26 @@ class PromptIntegration(unittest.TestCase):
     def render(self, prompt):
         return json.loads(self.sql("SELECT JSON_QUOTE(AI_COMPLETE('%s', %s))" % (self.model, prompt)))
 
+    def test_completion_null_config(self):
+        for config in ["NULL", "CAST(NULL AS CHAR)", "CAST(NULL AS JSON)"]:
+            with self.subTest(config=config):
+                expression = "AI_COMPLETE('%s', 'hello', %s)" % (self.model, config)
+                self.assertEqual(self.sql("SELECT LENGTH(%s) > 0 AS complete_ok" % expression), "1")
+                self.assertEqual(json.loads(self.sql("SELECT JSON_QUOTE(%s)" % expression)), "hello")
+        self.assertEqual(json.loads(self.sql(
+            "SELECT JSON_QUOTE(AI_COMPLETE('%s', AI_PROMPT('hello {0}', 'world'), NULL))" % self.model)),
+            "hello world")
+
+    def test_completion_string_config(self):
+        expression = "AI_COMPLETE('%s', 'hello', '{\"temperature\":0.2,\"max_tokens\":16}')" % self.model
+        self.assertEqual(json.loads(self.sql("SELECT JSON_QUOTE(%s)" % expression)), "hello")
+        self.assertEqual(self.requests[-1]["temperature"], 0.2)
+        self.assertEqual(self.requests[-1]["max_tokens"], 16)
+        count = len(self.requests)
+        error = self.sql("SELECT AI_COMPLETE('%s', 'hello', 'invalid-json')" % self.model, ok=False)
+        self.assertIn("ERROR 3140", error)
+        self.assertEqual(len(self.requests), count)
+
     def test_json_structure(self):
         value = json.loads(self.sql("SELECT AI_PROMPT('{0}/{1}', JSON_ARRAY(1,true,null), JSON_OBJECT('key',2))"))
         self.assertEqual(value, {"template": "{0}/{1}", "args": [[1, True, None], {"key": 2}]})
