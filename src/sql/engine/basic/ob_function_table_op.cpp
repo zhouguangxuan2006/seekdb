@@ -27,7 +27,7 @@ using namespace common;
 namespace sql
 {
 
-OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_);
+OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_, file_descriptor_, file_columns_);
 
 int ObFunctionTableOp::inner_open()
 {
@@ -36,6 +36,27 @@ int ObFunctionTableOp::inner_open()
   already_calc_ = false;
   if (OB_ISNULL(MY_SPEC.value_expr_)) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (!MY_SPEC.file_descriptor_.empty()) {
+    ObObj enabled;
+    ObString root;
+    std::string error;
+    if (OB_FAIL(ctx_.get_my_session()->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL,enabled))) {
+    } else if (!enabled.get_bool()) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED,"file SQL requires enable_file_sql=ON");
+    } else if (OB_FAIL(ctx_.get_my_session()->get_secure_file_priv(root))) {
+    } else {
+      const ObString &text=MY_SPEC.file_descriptor_;
+      auto status=file_sql::decode(std::string(text.ptr(),text.length()),file_schema_,error);
+      std::vector<size_t> projection;
+      for(int64_t i=0;i<MY_SPEC.file_columns_.count();++i) projection.push_back(MY_SPEC.file_columns_.at(i));
+      if(status==file_sql::Status::OK) {
+        file_reader_.reset(new file_sql::Reader);
+        status=file_reader_->open(file_schema_,std::string(root.ptr(),root.length()),error,projection);
+      }
+      if(status!=file_sql::Status::OK) {ret=OB_NOT_SUPPORTED;LOG_USER_ERROR(OB_NOT_SUPPORTED,error.c_str());}
+      else next_row_func_=&ObFunctionTableOp::inner_get_next_row_file;
+    }
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
   } else {
@@ -48,6 +69,9 @@ int ObFunctionTableOp::inner_rescan()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObOperator::inner_rescan())) {
+  } else if (file_reader_) {
+    std::string error;
+    if(file_reader_->rewind(error)!=file_sql::Status::OK) {ret=OB_NOT_SUPPORTED;LOG_USER_ERROR(OB_NOT_SUPPORTED,error.c_str());}
   } else {
     node_idx_ = 0;
     if (MY_SPEC.has_correlated_expr_) {
@@ -62,6 +86,8 @@ int ObFunctionTableOp::inner_rescan()
 
 int ObFunctionTableOp::inner_close()
 {
+  file_reader_.reset();
+  file_row_.clear();
   int ret = OB_SUCCESS;
   node_idx_ = 0;
   row_count_ = 0;
@@ -72,6 +98,10 @@ int ObFunctionTableOp::inner_close()
 
 void ObFunctionTableOp::destroy()
 {
+  file_reader_.~unique_ptr();
+  file_row_.~vector();
+  file_schema_.~Schema();
+  file_strings_.~deque();
   ObOperator::destroy();
 }
 
@@ -102,6 +132,88 @@ int ObFunctionTableOp::get_current_result(ObObj &result)
 int ObFunctionTableOp::inner_get_next_row()
 {
   return (this->*next_row_func_)();
+}
+
+
+
+int ObFunctionTableOp::inner_get_next_batch(int64_t max_row_cnt)
+{
+  int ret=OB_SUCCESS;
+  clear_evaluated_flag();
+  file_strings_.clear();filling_file_batch_=true;size_t bytes=0;
+  const int64_t count=MY_SPEC.file_descriptor_.empty()?1:std::min<int64_t>(max_row_cnt,MY_SPEC.max_batch_size_);
+  ObEvalCtx::BatchInfoScopeGuard guard(eval_ctx_);guard.set_batch_size(count);
+  brs_.size_=0;brs_.end_=false;brs_.skip_->reset(count);
+  for(int64_t i=0;OB_SUCC(ret)&&i<count;++i) {
+    guard.set_batch_idx(i);
+    ret=(this->*next_row_func_)();
+    if(ret==OB_ITER_END){brs_.end_=true;ret=OB_SUCCESS;break;}
+    if(OB_SUCC(ret)){++brs_.size_;for(const auto &cell:file_row_)bytes+=cell.text.size();if(bytes>=file_sql::MAX_ROW_BYTES)break;}
+  }
+  filling_file_batch_=false;
+  for(int64_t i=0;OB_SUCC(ret)&&i<MY_SPEC.column_exprs_.count();++i) {
+    MY_SPEC.column_exprs_.at(i)->get_evaluated_flags(eval_ctx_).set_all(brs_.size_);
+    MY_SPEC.column_exprs_.at(i)->set_evaluated_projected(eval_ctx_);
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_file()
+{
+  if(!filling_file_batch_)file_strings_.clear();
+  int ret=OB_SUCCESS;
+  clear_evaluated_flag();
+  std::string error;
+  if (OB_FAIL(ctx_.check_status())) return ret;
+  auto status=file_reader_->next(file_row_,error);
+  if(status==file_sql::Status::END)return OB_ITER_END;
+  if(status!=file_sql::Status::OK){LOG_USER_ERROR(OB_NOT_SUPPORTED,error.c_str());return OB_NOT_SUPPORTED;}
+  for(int64_t i=0;OB_SUCC(ret)&&i<MY_SPEC.column_exprs_.count();++i) {
+    size_t ordinal=MY_SPEC.file_columns_.at(i);
+    if(ordinal>=file_row_.size()){ret=OB_ERR_UNEXPECTED;break;}
+    const auto &cell=file_row_[ordinal];
+    ObExpr *expr=MY_SPEC.column_exprs_.at(i);
+    ObDatum &datum=expr->locate_datum_for_write(eval_ctx_);
+    const file_sql::Type expected=file_schema_.columns[ordinal].type;
+    if(!cell.null && expected!=file_sql::Type::STRING && expected!=cell.type
+       && !(expected==file_sql::Type::DOUBLE && cell.type==file_sql::Type::INT)
+       && !(expected==file_sql::Type::DATETIME && cell.type==file_sql::Type::DATE)) {
+      ret=OB_NOT_SUPPORTED;LOG_USER_ERROR(OB_NOT_SUPPORTED,"file value does not match inferred schema");break;
+    }
+    if(cell.null)datum.set_null();
+    else switch(expected) {
+      case file_sql::Type::INT: datum.set_int(std::strtoll(cell.text.c_str(),nullptr,10));break;
+      case file_sql::Type::DOUBLE: datum.set_double(std::strtod(cell.text.c_str(),nullptr));break;
+      case file_sql::Type::BOOL: datum.set_int(!cell.text.empty()&&(cell.text[0]=='t'||cell.text[0]=='T'));break;
+      case file_sql::Type::DATE:
+      case file_sql::Type::DATETIME: {
+        // Proleptic Gregorian civil date to Unix days, with no session-timezone conversion.
+        int year=std::stoi(cell.text.substr(0,4)), month=std::stoi(cell.text.substr(5,2)), day=std::stoi(cell.text.substr(8,2));
+        year-=month<=2;
+        int era=(year>=0?year:year-399)/400;
+        unsigned yoe=year-era*400;
+        unsigned doy=(153*(month+(month>2?-3:9))+2)/5+day-1;
+        unsigned doe=yoe*365+yoe/4-yoe/100+doy;
+        int64_t days=static_cast<int64_t>(era)*146097+doe-719468;
+        if(file_schema_.columns[ordinal].type==file_sql::Type::DATE)datum.set_date(days);
+        else {
+          int64_t micros=days*86400000000LL;
+          if(cell.text.size()>=19) {
+            micros+=(std::stoi(cell.text.substr(11,2))*3600LL+std::stoi(cell.text.substr(14,2))*60LL+std::stoi(cell.text.substr(17,2)))*1000000;
+            if(cell.text.size()>20){std::string fraction=cell.text.substr(20);fraction.resize(6,'0');micros+=std::stoi(fraction);}
+          }
+          datum.set_datetime(micros);
+        }
+        break;
+      }
+      default: {
+        file_strings_.push_back(cell.text);
+        const std::string &text=file_strings_.back();datum.set_string(text.data(),text.size());break;
+      }
+    }
+    expr->set_evaluated_projected(eval_ctx_);
+  }
+  return ret;
 }
 
 int ObFunctionTableOp::inner_get_next_row_udf()

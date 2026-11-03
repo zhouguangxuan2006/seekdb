@@ -5511,6 +5511,16 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   } else {
     spec.has_correlated_expr_ = value_raw_expr->has_flag(CNT_DYNAMIC_PARAM);
     spec.value_expr_ = value_expr;
+    OZ (spec.file_columns_.init(op.get_stmt()->get_column_size()));
+    if (OB_SUCC(ret) && value_raw_expr->is_const_raw_expr()) {
+      const ObObj &value = static_cast<ObConstRawExpr *>(value_raw_expr)->get_value();
+      if (value.is_varchar()) {
+        ObString text = value.get_string();
+        if (file_sql::is_descriptor(std::string(text.ptr(),text.length()))) {
+          OZ (ob_write_string(alloc,text,spec.file_descriptor_));
+        }
+      }
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
       if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {
       }
@@ -5526,6 +5536,7 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
         OZ (mark_expr_self_produced(col_item->expr_));
         OZ (generate_rt_expr(*col_item->expr_, rt_expr));
         OZ (spec.column_exprs_.push_back(rt_expr));
+        OZ (spec.file_columns_.push_back(col_item->column_id_ - OB_APP_MIN_COLUMN_ID));
       }
     }
   }

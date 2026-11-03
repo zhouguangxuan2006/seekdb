@@ -1,3 +1,4 @@
+#include "sql/engine/basic/ob_file_scan_utils.h"
 /*
  * Copyright (c) 2025 OceanBase.
  *
@@ -64,6 +65,16 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
         LOG_WARN("failed to generate stmt for child stmt");
       } else {
         explain_stmt->set_explain_query_stmt(static_cast<ObDMLStmt *>(child_stmt));
+        if (parse_tree.pos_ == 702 && child_stmt->is_select_stmt()) {
+          const ObDMLStmt *dml=static_cast<ObDMLStmt *>(child_stmt);
+          for(int64_t i=0;i<dml->get_table_size();++i) {
+            const TableItem *table=dml->get_table_item(i);
+            if(table->is_function_table()&&table->function_table_expr_->is_const_raw_expr()) {
+              const ObObj &value=static_cast<ObConstRawExpr *>(table->function_table_expr_)->get_value();
+              if(value.is_varchar()) {ObString text=value.get_string();explain_stmt->describe_file_schema_|=file_sql::is_descriptor(std::string(text.ptr(),text.length()));}
+            }
+          }
+        }
         ParseNode *format = parse_tree.children_[EXPLAIN_FORMAT];
         if (NULL != format) {
           switch (format->type_) {

@@ -281,8 +281,12 @@ int ObSql::fill_result_set(ObResultSet &result_set,
       field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
       field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
       field.type_.set_varchar(type_name);
-      if (OB_FAIL(result_set.reserve_field_columns(1))) {
-      } else if (OB_FAIL(result_set.add_field_column(field))) {
+      bool describe=static_cast<ObExplainStmt *>(stmt)->describe_file_schema_;
+      const char *names[]={"column_name","column_type","null","key","default","extra"};
+      OZ (result_set.reserve_field_columns(describe?6:1));
+      for(int i=0;OB_SUCC(ret)&&i<(describe?6:1);++i) {
+        if(describe){field.cname_=ObString::make_string(names[i]);field.org_cname_=field.cname_;}
+        OZ (result_set.add_field_column(field));
       }
       break;
     }

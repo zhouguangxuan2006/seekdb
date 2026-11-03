@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "config_bridge.h"
+#include "sql/engine/basic/ob_file_scan_utils.h"
 #include "share/config/ob_config_helper.h"
 #include "sql/resolver/cmd/ob_load_data_stmt.h"
 
@@ -122,6 +123,28 @@ int ObResolverUtils::get_all_function_table_column_names(const TableItem &table_
 {
   int ret = OB_SUCCESS;
   ObRawExpr *table_expr = NULL;
+  const ObRawExpr *file_expr = table_item.function_table_expr_;
+  if (file_expr != nullptr && file_expr->is_const_raw_expr()) {
+    const ObObj &value = static_cast<const ObConstRawExpr *>(file_expr)->get_value();
+    if (value.is_varchar()) {
+      const ObString text = value.get_string();
+      const std::string descriptor(text.ptr(), text.length());
+      if (file_sql::is_descriptor(descriptor)) {
+        file_sql::Schema schema;
+        std::string error;
+        if (file_sql::decode(descriptor, schema, error) != file_sql::Status::OK) {
+          return OB_ERR_UNEXPECTED;
+        }
+        for (const auto &column : schema.columns) {
+          ObString name;
+          OZ (ob_write_string(*params.allocator_,
+              ObString(column.name.size(), column.name.data()), name));
+          OZ (column_names.push_back(name));
+        }
+        return ret;
+      }
+    }
+  }
   ObPLPackageGuard *package_guard = nullptr;
   const ObUserDefinedType *user_type = NULL;
   ObExecContext *exec_ctx = params.session_info_->get_cur_exec_ctx();

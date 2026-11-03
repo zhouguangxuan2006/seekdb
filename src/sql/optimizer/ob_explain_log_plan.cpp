@@ -1,3 +1,4 @@
+#include "sql/engine/basic/ob_file_scan_utils.h"
 /*
  * Copyright (c) 2025 OceanBase.
  *
@@ -69,7 +70,42 @@ int ObExplainLogPlan::generate_normal_raw_plan()
       ObSEArray<common::ObString, 64> plan_strs;
       const ObString& into_table = explain_stmt->get_into_table();
       const ObString& statement_id = explain_stmt->get_statement_id();
-      if (OB_FAIL(sql_plan.store_sql_plan_for_explain(get_optimizer_context().get_exec_ctx(),
+      if(explain_stmt->describe_file_schema_) {
+        const ObSelectStmt *select=static_cast<const ObSelectStmt *>(child_stmt);
+        for(int64_t i=0;OB_SUCC(ret)&&i<select->get_select_item_size();++i) {
+          const SelectItem &item=select->get_select_item(i);
+          std::string name(item.alias_name_.ptr(),item.alias_name_.length());
+          if(name.empty())name.assign(item.expr_name_.ptr(),item.expr_name_.length());
+          std::string type="VARCHAR";bool nullable=true;
+          switch(item.expr_->get_data_type()) {
+            case ObIntType: type="BIGINT";break;case ObDoubleType:type="DOUBLE";break;
+            case ObTinyIntType:type="BOOLEAN";break;case ObDateType:type="DATE";break;
+            case ObDateTimeType:type="DATETIME";break;case ObNullType:type="NULL";break;default:break;
+          }
+          if(item.expr_->is_column_ref_expr()) {
+            const auto *column=static_cast<const ObColumnRefRawExpr *>(item.expr_);
+            const TableItem *table=select->get_table_item_by_id(column->get_table_id());
+            if(table&&table->is_function_table()&&table->function_table_expr_->is_const_raw_expr()) {
+              const ObObj &value=static_cast<const ObConstRawExpr *>(table->function_table_expr_)->get_value();
+              if(value.is_varchar()) {
+                ObString text=value.get_string();file_sql::Schema schema;std::string error;
+                if(file_sql::decode(std::string(text.ptr(),text.length()),schema,error)==file_sql::Status::OK) {
+                  uint64_t ordinal=column->get_column_id()-OB_APP_MIN_COLUMN_ID;
+                  if(ordinal<schema.columns.size()){nullable=schema.columns[ordinal].nullable;type=file_sql::type_name(schema.columns[ordinal].type);}
+                }
+              }
+            }
+          }
+          ObObj cells[6];ObString saved_name,saved_type;
+          OZ (ob_write_string(get_allocator(),ObString(name.size(),name.data()),saved_name));
+          OZ (ob_write_string(get_allocator(),ObString(type.size(),type.data()),saved_type));
+          cells[0].set_varchar(saved_name);cells[1].set_varchar(saved_type);cells[2].set_varchar(nullable?"YES":"NO");
+          for(int j=0;j<3;++j)cells[j].set_collation_type(CS_TYPE_UTF8MB4_BIN);
+          for(int j=3;j<6;++j)cells[j].set_null();
+          ObNewRow row;row.cells_=cells;row.count_=6;OZ (values_op->add_row(row));
+        }
+        optimizer_context_.set_packed(false);
+      } else if (OB_FAIL(sql_plan.store_sql_plan_for_explain(get_optimizer_context().get_exec_ctx(),
                                                       child_plan,
                                                       explain_stmt->get_explain_type(),
                                                       0 == into_table.length() ? "PLAN_TABLE" : into_table,
@@ -99,8 +135,10 @@ int ObExplainLogPlan::generate_normal_raw_plan()
     }
     get_optimizer_context().get_all_exprs().reuse();
     if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(allocate_output_expr_for_values_op(*values_op))) {
     } else {
+      for(int i=0;OB_SUCC(ret)&&i<(explain_stmt->describe_file_schema_?6:1);++i) {
+        OZ (allocate_output_expr_for_values_op(*values_op));
+      }
       get_optimizer_context().set_plan_type(ObPhyPlanType::OB_PHY_PLAN_LOCAL,
                                             ObPhyPlanType::OB_PHY_PLAN_LOCAL,
                                             false);

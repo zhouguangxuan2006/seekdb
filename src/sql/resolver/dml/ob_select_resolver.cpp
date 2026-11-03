@@ -1,3 +1,5 @@
+#include "sql/engine/basic/ob_file_scan_utils.h"
+#include <set>
 /*
  * Copyright (c) 2025 OceanBase.
  *
@@ -3105,7 +3107,48 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
       new(into_item) ObSelectIntoItem();
       into_item->into_type_ = node->type_;
       if (T_INTO_OUTFILE == node->type_) { // into outfile
-        if (is_in_set_query()) {
+        if (node->value_ == 703) {
+          ObObj enabled;
+          OZ (session_info_->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL,enabled));
+          if(OB_SUCC(ret)&&!enabled.get_bool()){ret=OB_NOT_SUPPORTED;LOG_USER_ERROR(OB_NOT_SUPPORTED,"COPY requires enable_file_sql=ON");}
+          file_sql::Schema schema;
+          schema.path.assign(node->children_[0]->str_value_,node->children_[0]->str_len_);
+          schema.options.header=false;
+          const ParseNode *options=node->children_[1];std::set<std::string> seen;
+          for(int i=0;OB_SUCC(ret)&&options&&i<options->num_child_;++i) {
+            const ParseNode *option=options->children_[i], *key=option->children_[0], *val=option->children_[1];
+            std::string name(key->str_value_,key->str_len_);for(char &c:name)if(c>='A'&&c<='Z')c+='a'-'A';
+            if(name=="delim")name="delimiter";
+            if(!seen.insert(name).second){ret=OB_ERR_PARSE_SQL;break;}
+            if(name=="header") {
+              if(!val)schema.options.header=true;
+              else if(val->type_==T_BOOL)schema.options.header=val->value_!=0;
+              else ret=OB_ERR_PARSE_SQL;
+            }else if(name=="format") {
+              if(!val||ObString(val->str_len_,val->str_value_).case_compare("csv")!=0)ret=OB_NOT_SUPPORTED;
+            }else if(name=="nullstr"||name=="delimiter"||name=="delim"||name=="quote"||name=="escape") {
+              if(!val||val->type_!=T_VARCHAR)ret=OB_ERR_PARSE_SQL;
+              else if(name=="nullstr")schema.options.nullstr.assign(val->str_value_,val->str_len_);
+              else if(val->str_len_!=1)ret=OB_ERR_PARSE_SQL;
+              else if(name=="delimiter"||name=="delim")schema.options.delimiter=val->str_value_[0];
+              else if(name=="quote")schema.options.quote=val->str_value_[0];
+              else schema.options.escape=val->str_value_[0];
+            }else ret=OB_ERR_PARSE_SQL;
+          }
+          if(seen.count("quote")&&!seen.count("escape"))schema.options.escape=schema.options.quote;
+          for(int64_t i=0;OB_SUCC(ret)&&i<select_stmt->get_select_item_size();++i){
+            const auto &item=select_stmt->get_select_item(i);
+            ObString name=item.alias_name_.empty()?item.expr_name_:item.alias_name_;
+            schema.columns.push_back({std::string(name.ptr(),name.length()),file_sql::Type::STRING,true});
+          }
+          if(OB_SUCC(ret)) {
+            std::string descriptor="seekdb:file-copy:v1:"+file_sql::encode(schema);
+            ObString saved;OZ (ob_write_string(*allocator_,ObString(descriptor.size(),descriptor.data()),saved));
+            into_item->outfile_name_.set_varchar(saved);
+            select_stmt->get_query_ctx()->get_query_hint_for_update().get_global_hint().merge_plan_cache_hint(OB_USE_PLAN_CACHE_NONE);
+      select_stmt->get_query_ctx()->get_query_hint_for_update().get_global_hint().merge_parallel_hint(1);
+          }
+        } else if (is_in_set_query()) {
           ret = OB_INAPPROPRIATE_INTO;
         } else if (node->num_child_ == 3 && NULL != node->children_[1]
             && T_EXTERNAL_FILE_FORMAT == node->children_[1]->type_) { // Handle with `FORMAT`

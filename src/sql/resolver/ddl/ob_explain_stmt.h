@@ -41,6 +41,7 @@ struct ObExplainDisplayOpt
 class ObExplainStmt : public ObDMLStmt
 {
 public:
+  bool describe_file_schema_ = false;
   ObExplainStmt();
   virtual ~ObExplainStmt();
   void set_explain_format(ExplainType format) { format_ = format; }

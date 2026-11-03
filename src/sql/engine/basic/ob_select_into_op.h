@@ -18,6 +18,7 @@
 #define SRC_SQL_ENGINE_BASIC_OB_SELECT_INTO_OP_H_
 
 #include "sql/engine/ob_operator.h"
+#include "sql/engine/basic/ob_file_scan_utils.h"
 #include "lib/file/ob_file.h"
 #include "sql/engine/cmd/ob_load_data_parser.h"
 #include "sql/engine/basic/ob_select_into_basic.h"
@@ -195,6 +196,12 @@ public:
   virtual void destroy() override;
 
 private:
+  int init_file_copy();
+  int copy_file_row();
+  int finish_file_copy();
+  std::unique_ptr<file_sql::CsvWriter> copy_writer_;
+  std::vector<char> copy_buffer_;
+  bool copy_finished_ = false;
   int init_env_common();
   int init_csv_env();
   void set_csv_format_options();
