@@ -96,6 +96,13 @@ class PromptIntegration(unittest.TestCase):
         self.assertIn("ERROR 3140", error)
         self.assertEqual(len(self.requests), count)
 
+    def test_authenticated_provider_still_requires_key(self):
+        config = {"ai_model_name": self.model, "scope": "all", "provider": "openai",
+                  "url": "http://127.0.0.1:%d/v1/chat/completions" % self.server.server_port,
+                  "access_key": ""}
+        self.sql("CALL DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('%s', '%s')" %
+                 (self.endpoint + "_empty", json.dumps(config)), ok=False)
+
     def test_json_structure(self):
         value = json.loads(self.sql("SELECT AI_PROMPT('{0}/{1}', JSON_ARRAY(1,true,null), JSON_OBJECT('key',2))"))
         self.assertEqual(value, {"template": "{0}/{1}", "args": [[1, True, None], {"key": 2}]})
