@@ -17,6 +17,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
+#include "sql/engine/expr/ob_expr_ai/ai_column_internal.h"
 #include "config_bridge.h"
 #include "ob_dml_resolver.h"
 #include "sql/resolver/dml/ob_view_table_resolver.h"
@@ -1835,6 +1836,9 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
                                              ObDMLStmt *stmt /* = NULL */)
 {
   int ret = OB_SUCCESS;
+  const bool explicit_reference = !include_hidden && !AiColumnInternalAccess::contains(session_info_);
+  include_hidden = include_hidden || AiColumnInternalAccess::contains(session_info_) ||
+      (params_.query_ctx_ != nullptr && params_.query_ctx_->ai_retry_table_id_ == table_item.ref_id_);
   ObColumnRefRawExpr *col_expr = NULL;
   ObSchemaGetterGuard *schema_guard = NULL;
   ColumnItem column_item;
@@ -1959,6 +1963,21 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
       } else if (OB_FAIL(col_expr->pull_relation_id())) {
       } else {
         col_item = stmt->get_column_item(stmt->get_column_size() - 1);
+      }
+    }
+  }
+  if (OB_SUCC(ret) && explicit_reference && col_item != nullptr && params_.query_ctx_ != nullptr) {
+    const ObColumnSchemaV2 *ai_column = nullptr;
+    if (OB_FAIL(get_column_schema(table_item.ref_id_, col_item->column_id_, ai_column, true))) {
+    } else if (ai_column != nullptr && ai_column->is_ai_column()) {
+      auto &refs = params_.query_ctx_->ai_column_refs_;
+      bool exists = false;
+      for (int64_t i = 0; i + 1 < refs.count(); i += 2) {
+        exists |= refs.at(i) == table_item.ref_id_ && refs.at(i + 1) == col_item->column_id_;
+      }
+      if (!exists) {
+        OZ(refs.push_back(table_item.ref_id_));
+        OZ(refs.push_back(col_item->column_id_));
       }
     }
   }

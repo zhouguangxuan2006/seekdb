@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
+#include "sql/resolver/ddl/ai_column_retry.h"
 #include "sql/resolver/ob_resolver.h"
 #include "lib/utility/ob_smart_call.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
@@ -160,19 +161,19 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       || OB_ISNULL(params_.query_ctx_)) {
     ret = OB_NOT_INIT;
   } else {
-    real_parse_tree = &parse_tree;
+    ret = lower_ai_column_retry(params_, parse_tree, real_parse_tree);
   }
 
   if (OB_SUCC(ret)) {
-    params_.resolver_scope_stmt_type_ = parse_tree.type_;
+    params_.resolver_scope_stmt_type_ = real_parse_tree->type_;
     params_.session_info_->set_stmt_type(
-      ObResolverUtils::get_stmt_type_by_item_type(parse_tree.type_));
+      ObResolverUtils::get_stmt_type_by_item_type(real_parse_tree->type_));
     ObExecContext *exec_ctx = params_.session_info_->get_cur_exec_ctx();
     if (exec_ctx != nullptr && exec_ctx->get_sql_ctx() != nullptr) {
       //save the current stmt type on my context,
       //some other modules may need to get the current SQL stmt type through its context
       ObSqlCtx *sql_ctx = exec_ctx->get_sql_ctx();
-      sql_ctx->stmt_type_ = ObResolverUtils::get_stmt_type_by_item_type(parse_tree.type_);
+      sql_ctx->stmt_type_ = ObResolverUtils::get_stmt_type_by_item_type(real_parse_tree->type_);
     }
 
     switch (real_parse_tree->type_) {
@@ -402,6 +403,7 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       case T_SHOW_DATABASES:
       case T_SHOW_VARIABLES:
       case T_SHOW_COLUMNS:
+      case T_SHOW_AI_COLUMNS:
       case T_SHOW_SCHEMA:
       case T_SHOW_CREATE_DATABASE:
       case T_SHOW_CREATE_TABLE:

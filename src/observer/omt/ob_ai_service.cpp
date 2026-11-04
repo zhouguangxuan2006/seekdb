@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SERVER_OMT
 #include "ob_ai_service.h"
+#include "observer/ai_service/ai_column_worker.h"
 #include "observer/ai_service/ob_ai_service_executor.h"
 #include "sql/privilege_check/ob_ai_model_priv_util.h"
 #include "sql/session/ob_sql_session_info.h"
@@ -59,8 +60,20 @@ int ObAiService::init()
   return ret;
 }
 
+int ObAiService::start()
+{
+  if (!is_inited_) return OB_NOT_INIT;
+  if (column_worker_ != nullptr) return OB_INIT_TWICE;
+  column_worker_ = new(std::nothrow) AiColumnWorker();
+  if (column_worker_ == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+  return column_worker_->start();
+}
+void ObAiService::stop() { if (column_worker_ != nullptr) column_worker_->stop(); }
+void ObAiService::wait() { if (column_worker_ != nullptr) column_worker_->wait(); }
 void ObAiService::destroy()
 {
+  stop(); wait();
+  delete column_worker_; column_worker_ = nullptr;
   is_inited_ = false;
 }
 

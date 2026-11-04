@@ -31,6 +31,11 @@ int ObCodeGenerator::generate(const ObLogPlan &log_plan,
 {
   int ret = OB_SUCCESS;
   int64_t batch_size = 0;
+  if (log_plan.get_stmt() != nullptr && log_plan.get_stmt()->get_query_ctx() != nullptr) {
+    phy_plan.ai_retry_table_id_ = log_plan.get_stmt()->get_query_ctx()->ai_retry_table_id_;
+    phy_plan.ai_retry_column_id_ = log_plan.get_stmt()->get_query_ctx()->ai_retry_column_id_;
+    OZ(phy_plan.ai_column_refs_.assign(log_plan.get_stmt()->get_query_ctx()->ai_column_refs_));
+  }
   OZ(detect_batch_size(log_plan, batch_size));
   if (OB_SUCC(ret) && batch_size > 0) {
     log_plan.get_optimizer_context().set_batch_size(batch_size);

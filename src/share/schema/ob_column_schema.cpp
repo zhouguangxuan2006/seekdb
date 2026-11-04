@@ -18,6 +18,10 @@
 #include "ob_column_schema.h"
 #include "share/schema/ob_schema_service.h"
 
+#include "rapidjson/document.h"
+#include "rapidjson/writer.h"
+#include "rapidjson/stringbuffer.h"
+
 namespace oceanbase
 {
 using namespace std;
@@ -82,6 +86,7 @@ int ObColumnSchemaV2::assign(const ObColumnSchemaV2 &src_schema)
     } else if (OB_FAIL(deep_copy_obj(src_schema.cur_default_value_, cur_default_value_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.column_name_, column_name_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.comment_, comment_))) {
+    } else if (OB_FAIL(set_ai_column_info(src_schema.ai_column_info_))) {
     } else if (OB_FAIL(set_extended_type_info(src_schema.extended_type_info_))) {
     } else if (src_schema.column_ref_idxs_ != NULL) {
       if (OB_FAIL(alloc_column_ref_set())) {
@@ -120,6 +125,7 @@ int64_t ObColumnSchemaV2::get_convert_size() const
   convert_size += cur_default_value_.get_deep_copy_size();
   convert_size += column_name_.length() + 1;
   convert_size += comment_.length() + 1;
+  convert_size += ai_column_info_.length() + 1;
   if (column_ref_idxs_ != NULL) {
     convert_size += sizeof(ColumnReferenceSet);
   }
@@ -188,6 +194,7 @@ void ObColumnSchemaV2::reset()
   skip_index_attr_.reset();
   lob_chunk_size_ = OB_DEFAULT_LOB_CHUNK_SIZE;
   local_session_vars_.reset();
+  ai_column_info_.reset();
   ObSchema::reset();
 }
 
@@ -235,7 +242,8 @@ OB_DEF_SERIALIZE(ObColumnSchemaV2)
                 sub_type_,
                 skip_index_attr_,
                 lob_chunk_size_,
-                local_session_vars_);
+                local_session_vars_,
+                ai_column_info_);
   }
 
   return ret;
@@ -249,6 +257,8 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
   ObString column_name;
   ObString comment;
   bool has_column_ref = false;
+  ObString ai_column_info;
+  ai_column_info_.reset();
 
   LST_DO_CODE(OB_UNIS_DECODE,
               table_id_,
@@ -296,6 +306,13 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
                 skip_index_attr_,
                 lob_chunk_size_,
                 local_session_vars_);
+    // Older serialized definitions have no AI extension.
+    if (OB_SUCC(ret) && pos < data_len) {
+      OB_UNIS_DECODE(ai_column_info);
+      if (OB_SUCC(ret)) {
+        ret = set_ai_column_info(ai_column_info);
+      }
+    }
   }
   return ret;
 }
@@ -340,7 +357,8 @@ OB_DEF_SERIALIZE_SIZE(ObColumnSchemaV2)
               sub_type_,
               skip_index_attr_,
               lob_chunk_size_,
-              local_session_vars_);
+              local_session_vars_,
+              ai_column_info_);
   return len;
 }
 
@@ -409,7 +427,7 @@ int64_t ObColumnSchemaV2::to_string(char *buf, const int64_t buf_len) const
     K_(skip_index_attr),
     K_(lob_chunk_size),
     KPC_(column_ref_idxs),
-    K(local_session_vars_));
+    K(local_session_vars_), K_(ai_column_info));
   J_OBJ_END();
   return pos;
 }
@@ -521,6 +539,28 @@ int ObColumnSchemaV2::add_type_info(const ObString &type_info)
 int ObColumnSchemaV2::convert_column_id(const hash::ObHashMap<uint64_t, uint64_t> &column_id_map)
 {
   int ret = OB_SUCCESS;
+  if (is_ai_column()) {
+    rapidjson::Document metadata;
+    metadata.Parse(ai_column_info_.ptr(), ai_column_info_.length());
+    if (metadata.HasParseError() || !metadata.IsObject()) return OB_ERR_UNEXPECTED;
+    for (const char *key : {"state_column_id", "request_column_id", "result_spec_column_id"}) {
+      uint64_t mapped = 0;
+      if (!metadata.HasMember(key) || !metadata[key].IsUint64()) return OB_ERR_UNEXPECTED;
+      if (OB_FAIL(column_id_map.get_refactored(metadata[key].GetUint64(), mapped))) return ret;
+      metadata[key].SetUint64(mapped);
+    }
+    if (!metadata.HasMember("dependencies") || !metadata["dependencies"].IsArray()) return OB_ERR_UNEXPECTED;
+    for (auto &dependency : metadata["dependencies"].GetArray()) {
+      uint64_t mapped = 0;
+      if (!dependency.IsUint64()) return OB_ERR_UNEXPECTED;
+      if (OB_FAIL(column_id_map.get_refactored(dependency.GetUint64(), mapped))) return ret;
+      dependency.SetUint64(mapped);
+    }
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    metadata.Accept(writer);
+    if (OB_FAIL(set_ai_column_info(ObString(buffer.GetSize(), buffer.GetString())))) return ret;
+  }
   ObSEArray<uint64_t, 1> old_column_ids;
   if (OB_FAIL(get_cascaded_column_ids(old_column_ids))) {
   } else {

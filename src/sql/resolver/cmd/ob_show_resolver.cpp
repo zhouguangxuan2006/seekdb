@@ -150,7 +150,8 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             && OB_UNLIKELY(parse_tree.type_ != T_SHOW_ENGINE)
             && OB_UNLIKELY(parse_tree.type_ != T_SHOW_OPEN_TABLES)
             && OB_UNLIKELY(parse_tree.type_ != T_SHOW_CREATE_USER)
-            && OB_UNLIKELY(parse_tree.type_ != T_SHOW_CHECK_TABLE)) {
+            && OB_UNLIKELY(parse_tree.type_ != T_SHOW_CHECK_TABLE)
+            && OB_UNLIKELY(parse_tree.type_ != T_SHOW_AI_COLUMNS)) {
     ret = OB_ERR_UNEXPECTED;
   } else {
     real_id = 1;
@@ -361,6 +362,39 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             }
           }
         }();
+        break;
+      }
+      case T_SHOW_AI_COLUMNS: {
+        if (parse_tree.num_child_ != 1 || parse_tree.children_ == nullptr || parse_tree.children_[0] == nullptr) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          ObString db_name, table_name;
+          uint64_t db_id = OB_INVALID_ID, table_id = OB_INVALID_ID;
+          bool is_view = false;
+          show_resv_ctx.stmt_type_ = stmt::T_SHOW_COLUMNS;
+          if (OB_FAIL(resolve_show_from_table(parse_tree.children_[0], nullptr,
+              database_name.empty(), T_SHOW_COLUMNS, real_id, db_name, db_id,
+              table_name, table_id, is_view))) {
+          } else {
+            ObNeedPriv privilege;
+            privilege.priv_set_ = OB_PRIV_SELECT;
+            privilege.priv_level_ = OB_PRIV_TABLE_LEVEL;
+            privilege.db_ = db_name;
+            privilege.table_ = table_name;
+            if (OB_FAIL(stmt_need_privs.need_privs_.init(1))) {
+            } else if (OB_FAIL(stmt_need_privs.need_privs_.push_back(privilege))) {
+            } else if (OB_FAIL(schema_checker_->check_priv(session_priv, enable_role_id_array, stmt_need_privs))) {
+            } else if (OB_FAIL(sql_gen.init(params_.allocator_))) {
+            } else if (OB_FAIL(sql_gen.gen_select_str(
+                "SELECT column_name, normalized_expr, sync_mode, max_retries "))) {
+            } else if (OB_FAIL(sql_gen.gen_from_str(
+                "SELECT column_name,normalized_expr,sync_mode,max_retries FROM "
+                "oceanbase.__all_ai_column WHERE table_id=%lu ORDER BY column_id", table_id))) {
+            } else {
+              sql_gen.assign_sql_str(select_sql);
+            }
+          }
+        }
         break;
       }
       case T_SHOW_COLUMNS: {

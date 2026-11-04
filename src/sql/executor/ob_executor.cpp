@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_EXE
 
 #include "ob_executor.h"
+#include "sql/engine/expr/ob_expr_ai/ai_column_strict_read.h"
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 
@@ -61,6 +62,7 @@ int ObExecutor::execute_plan(ObExecContext &ctx)
     ret = OB_NOT_INIT;
   } else if (OB_ISNULL(phy_plan_)) {
     ret = OB_NOT_INIT;
+  } else if (OB_FAIL(check_ai_column_strict_read(ctx, *phy_plan_))) {
   } else if (OB_FAIL(session_info->set_cur_phy_plan(phy_plan_))) {
   } else if (OB_FAIL(phy_plan_->get_expr_frame_info()
                                  .pre_alloc_exec_memory(ctx))) {

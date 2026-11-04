@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
+#include "sql/engine/dml/ai_column_dml.h"
 #include "config_bridge.h"
 #include "sql/engine/dml/ob_dml_service.h"
 #include "sql/engine/expr/ob_datum_cast.h"
@@ -632,6 +633,7 @@ int ObDMLService::process_insert_row(const ObInsCtDef &ins_ctdef,
     }
 
   }
+  if (OB_SUCC(ret) && !is_skipped && ins_ctdef.is_primary_index_) { ret = AiColumnDml::process(ins_ctdef, dml_op, AiColumnDml::Action::INSERT); if (OB_FAIL(ret)) LOG_WARN("AI column DML processing failed", K(ret), K(ins_ctdef.das_base_ctdef_.index_tid_)); }
   return ret;
 }
 
@@ -734,6 +736,7 @@ int ObDMLService::process_delete_row(const ObDelCtDef &del_ctdef,
                "old_row", ROWEXPR2STR(dml_op.get_eval_ctx(), del_ctdef.old_row_));
   }
 
+  if (OB_SUCC(ret) && !is_skipped && del_ctdef.is_primary_index_) { ret = AiColumnDml::process(del_ctdef, dml_op, AiColumnDml::Action::DELETE); if (OB_FAIL(ret)) LOG_WARN("AI column DML processing failed", K(ret), K(del_ctdef.das_base_ctdef_.index_tid_)); }
   return ret;
 }
 
@@ -832,6 +835,7 @@ int ObDMLService::process_update_row(const ObUpdCtDef &upd_ctdef,
                 "old_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.old_row_),
                 "new_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.new_row_));
   }
+  if (OB_SUCC(ret) && !is_skipped && upd_rtdef.is_row_changed_ && upd_ctdef.is_primary_index_) { ret = AiColumnDml::process(upd_ctdef, dml_op, AiColumnDml::Action::UPDATE); if (OB_FAIL(ret)) LOG_WARN("AI column DML processing failed", K(ret), K(upd_ctdef.das_base_ctdef_.index_tid_)); }
   return ret;
 }
 

@@ -3259,6 +3259,11 @@ int ObLSTabletService::insert_vector_index_rows(
           // process for each row or call batch
           // set vector null for not to storage
           rows[k].storage_datums_[vector_idx].set_null();
+          // Delta rows are the latest MVCC state for (vid, I/D), not unique
+          // business inserts. A later invalidation/recomputation can emit the
+          // same key again. Use native put semantics while retaining the usual
+          // transaction conflict checks and historical versions for rollback.
+          rows[k].row_flag_.set_flag(ObDmlFlag::DF_UPDATE);
         }
         adaptor_guard.get_adatper()->update_can_skip(NOT_SKIP);
       }

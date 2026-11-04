@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
+#include "sql/engine/expr/ob_expr_ai/ai_column_internal.h"
 #include "ob_del_upd_resolver.h"
 #include "sql/resolver/dml/ob_default_value_utils.h"
 #include "sql/resolver/dml/ob_update_stmt.h"
@@ -511,7 +512,22 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
     } else if (OB_ISNULL(table_schema)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("fail to get table schema", KPC(table_item), K(table_schema));
+    } else {
+      if (!AiColumnInternalAccess::contains(session_info_)) {
+        for (const auto &assignment : assigns.at(i).assignments_) {
+          const auto *target = table_schema->get_column_schema(assignment.column_expr_->get_column_id());
+          if (target != nullptr && target->is_ai_column() && !assignment.is_implicit_) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "direct assignment to an AI column");
+            break;
+          }
+        }
+      }
+    }
+    if (OB_FAIL(ret)) {
     } else if (OB_FAIL(table_schema->has_before_update_row_trigger(*schema_guard, trigger_exist))) {
+    } else if (!AiColumnInternalAccess::contains(session_info_) && ai_column_has_definition(*table_schema)
+               && OB_FALSE_IT(trigger_exist = true)) {
     } else if (OB_FAIL(generate_wrapper_expr_for_assignemnts(assigns.at(i).assignments_, trigger_exist))) {
     } else if (OB_FAIL(check_update_vector_col_with_vector_index(table_schema,
                                                                  schema_guard,
@@ -1828,6 +1844,26 @@ int ObDelUpdResolver::generate_column_conv_function(ObInsertTableInfo &table_inf
       } else if (OB_FAIL(build_column_conv_function_with_value_desc(table_info, i, column_ref))) {
       }
     } //end for
+  }
+  if (OB_SUCC(ret)) {
+    const ObTableSchema *schema = nullptr;
+    if (OB_FAIL(schema_checker_->get_table_schema(table_info.ref_table_id_, schema))) {
+    } else if (schema != nullptr && ai_column_has_definition(*schema)
+               && !session_info_->get_ddl_info().is_ddl()
+               && !AiColumnInternalAccess::contains(session_info_)) {
+      for (const auto *value : table_info.values_desc_) {
+        const auto *column = schema->get_column_schema(value->get_column_id());
+        if (column != nullptr && column->is_ai_column()) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "direct assignment to an AI column");
+          break;
+        }
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < table_info.column_conv_exprs_.count(); ++i) {
+        ObRawExpr *&expr = table_info.column_conv_exprs_.at(i);
+        if (OB_FAIL(ObRawExprUtils::build_wrapper_inner_expr(*params_.expr_factory_, *session_info_, expr, expr))) {}
+      }
+    }
   }
   return ret;
 }

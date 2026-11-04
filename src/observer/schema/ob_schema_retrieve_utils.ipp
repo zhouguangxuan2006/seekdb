@@ -1074,6 +1074,16 @@ int ObSchemaRetrieveUtils::fill_column_schema(const bool check_deleted, T &resul
     }
   }
 
+  if (OB_SUCC(ret) && !is_deleted) {
+    ObString ai_column_info;
+    ObString empty_info("");
+    EXTRACT_VARCHAR_FIELD_MYSQL_WITH_DEFAULT_VALUE(result, "ai_column_info",
+        ai_column_info, true, true, empty_info);
+    if (OB_SUCC(ret) && OB_FAIL(column.set_ai_column_info(ai_column_info))) {
+      SHARE_SCHEMA_LOG(WARN, "fail to copy AI column metadata", K(ret));
+    }
+  }
+
   return ret;
 }
 

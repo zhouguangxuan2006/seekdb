@@ -25,6 +25,7 @@
 #include "sql/session/ob_local_session_var.h"
 #include "query/command/ob_root_command_service.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "sql/resolver/ddl/ai_column_schema_builder.h"
 
 namespace oceanbase
 {
@@ -774,6 +775,17 @@ int ObAlterTableResolver::resolve_column_options(const ParseNode &node,
         ret = OB_ERR_UNEXPECTED;
         SQL_RESV_LOG(WARN, "invalid parse tree!", K(ret));
       } else {
+        bool contains_ai = false;
+        for (int64_t j = 0; j < table_schema_->get_column_count(); ++j) {
+          const ObColumnSchemaV2 *column = table_schema_->get_column_schema_by_idx(j);
+          contains_ai |= column != nullptr && column->is_ai_column();
+        }
+        if (contains_ai && column_node->type_ != T_COLUMN_ADD
+            && column_node->type_ != T_COLUMN_ADD_WITH_LOB_PARAMS) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "changing existing AI table columns is not enabled");
+          break;
+        }
         switch(column_node->type_) {
         //add column
         case T_COLUMN_ADD: {
@@ -3453,10 +3465,63 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
           }
         }
 
+        AlterColumnSchema ai_hidden_columns[3];
+        int64_t ai_hidden_count = 0;
+        const ParseNode *definition_node = node.children_[i];
+        if (OB_SUCC(ret) && definition_node->num_child_ == 5
+            && definition_node->children_[4] != nullptr
+            && definition_node->children_[4]->type_ == T_AI_COLUMN_DEFINITION) {
+          ObTableSchema complete;
+          uint64_t last_id = table_schema_->get_max_used_column_id();
+          const ObTableSchema &previous = alter_table_stmt->get_alter_table_schema();
+          if (OB_FAIL(complete.assign(*table_schema_))) {
+          }
+          for (int64_t j = 0; OB_SUCC(ret) && j < previous.get_column_count(); ++j) {
+            const ObColumnSchemaV2 *existing = previous.get_column_schema_by_idx(j);
+            ObColumnSchemaV2 added;
+            if (existing == nullptr) ret = OB_ERR_UNEXPECTED;
+            else if (OB_FAIL(added.assign(*existing))) {
+            } else {
+              added.set_column_id(++last_id);
+              ret = complete.add_column(added);
+            }
+          }
+          alter_column_schema.set_column_id(++last_id);
+          const uint64_t result_id = last_id;
+          if (OB_SUCC(ret) && OB_FAIL(complete.add_column(alter_column_schema))) {
+          }
+          ParseNode elements{};
+          ParseNode *children[] = {node.children_[i]};
+          elements.type_ = T_TABLE_ELEMENT_LIST;
+          elements.num_child_ = 1;
+          elements.children_ = children;
+          if (OB_SUCC(ret) && OB_FAIL(build_ai_column_schemas(&elements, complete, last_id))) {
+          }
+          if (OB_SUCC(ret)) {
+            const ObColumnSchemaV2 *resolved = complete.get_column_schema(result_id);
+            if (resolved == nullptr) ret = OB_ERR_UNEXPECTED;
+            else ret = alter_column_schema.set_ai_column_info(resolved->get_ai_column_info());
+          }
+          for (uint64_t id = result_id + 1; OB_SUCC(ret) && id <= last_id; ++id) {
+            const ObColumnSchemaV2 *hidden = complete.get_column_schema(id);
+            AlterColumnSchema &added = ai_hidden_columns[ai_hidden_count];
+            if (hidden == nullptr) ret = OB_ERR_UNEXPECTED;
+            else if (OB_FAIL(added.ObColumnSchemaV2::assign(*hidden))) {
+            } else if (OB_FAIL(added.set_origin_column_name(hidden->get_column_name_str()))) {
+            } else {
+              added.alter_type_ = OB_DDL_ADD_COLUMN;
+              ++ai_hidden_count;
+            }
+          }
+        }
+
         //add column
         if (OB_SUCC(ret)) {
           if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
+          }
+          for (int64_t j = 0; OB_SUCC(ret) && j < ai_hidden_count; ++j) {
+            ret = alter_table_stmt->add_column(ai_hidden_columns[j]);
           }
         }
       }

@@ -60,6 +60,9 @@ typedef common::ObFixedArray<ObPlanPwjConstraint, common::ObIAllocator> PlanPwjC
 class ObPhysicalPlan : public ObPlanCacheObject
 {
 public:
+  uint64_t ai_retry_table_id_ = 0;
+  uint64_t ai_retry_column_id_ = 0;
+  common::ObSEArray<uint64_t, 8> ai_column_refs_;
   static const int32_t SLOW_QUERY_TIME = 100000; //100ms
   static const int64_t SLOW_QUERY_TIME_FOR_PLAN_EXPIRE = 5000; // 5ms
   static const int64_t SLOW_QUERY_ROW_COUNT_THRESOLD = 5000;

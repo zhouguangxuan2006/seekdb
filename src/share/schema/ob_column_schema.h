@@ -139,6 +139,11 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline int set_cur_default_value_v2(const common::ObObj default_value) { return deep_copy_obj(default_value, cur_default_value_); }
   inline int set_column_name(const char *col_name) { return deep_copy_str(col_name, column_name_); }
   inline int set_column_name(const common::ObString &col_name) { return deep_copy_str(col_name, column_name_); }
+  // AI definition metadata is owned by the schema allocator, independently of
+  // parser/RPC buffers. An empty value denotes an ordinary column.
+  inline bool is_ai_column() const { return !ai_column_info_.empty(); }
+  inline const common::ObString &get_ai_column_info() const { return ai_column_info_; }
+  inline int set_ai_column_info(const common::ObString &info) { return deep_copy_str(info, ai_column_info_); }
   inline int set_comment(const char *comment) { return deep_copy_str(comment, comment_); }
   inline int set_comment(const common::ObString &comment) { return deep_copy_str(comment, comment_); }
   inline void set_on_update_current_timestamp(const bool is_on_update_for_timestamp) { on_update_current_timestamp_ = is_on_update_for_timestamp; }
@@ -398,6 +403,7 @@ private:
   ObSkipIndexColumnAttr skip_index_attr_;
   int64_t lob_chunk_size_;
   share::ObLocalSessionVar local_session_vars_;
+  common::ObString ai_column_info_;
 };
 
 inline int32_t ObColumnSchemaV2::get_data_length() const

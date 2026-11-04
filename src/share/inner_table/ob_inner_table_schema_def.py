@@ -342,7 +342,8 @@ all_column_def = dict(
       ('sub_data_type', 'int', 'false', '0'),
       ('skip_index_attr', 'int', 'false', '0'),
       ('lob_chunk_size', 'int', 'false', 'OB_DEFAULT_LOB_CHUNK_SIZE'),
-      ('local_session_vars', 'longtext', 'true')
+      ('local_session_vars', 'longtext', 'true'),
+      ('ai_column_info', 'longtext', 'true')
   ]
   )
 
@@ -2466,6 +2467,66 @@ all_objauth_mysql_def = dict(
   )
 def_table_schema(**all_objauth_mysql_def)
 def_table_schema(**gen_history_table_def(1134, all_objauth_mysql_def))
+
+# AI column definitions are committed by DDL together with the result and state
+# columns. Task rows are written by DML using the business transaction, never by
+# an autonomous connection. A worker can therefore only see committed inputs.
+all_ai_column_def = dict(
+    owner = 'seekdb',
+    table_name = '__all_ai_column',
+    table_id = '1135',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    rowkey_columns = [('table_id', 'int'), ('column_id', 'int')],
+    normal_columns = [
+        ('column_name', 'varchar:128', 'false'),
+        ('definition_version', 'int', 'false'),
+        ('normalized_expr', 'longtext', 'false'),
+        ('dependency_column_ids', 'longtext', 'false'),
+        ('model_name', 'varchar:128', 'false'),
+        ('sync_mode', 'varchar:16', 'false'),
+        ('max_retries', 'int', 'false'),
+        ('state_column_id', 'int', 'false'),
+        ('request_column_id', 'int', 'false'),
+        ('result_spec_column_id', 'int', 'false'),
+        ('result_spec', 'longtext', 'false'),
+    ]
+)
+def_table_schema(**all_ai_column_def)
+def_table_schema(**gen_history_table_def(1136, all_ai_column_def))
+
+# request_id identifies a row-change group. claim_epoch fences an expired owner
+# even when a later claimant uses the same worker identity after a restart.
+def_table_schema(
+    owner = 'seekdb',
+    table_name = '__all_ai_column_task',
+    table_id = '1137',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    rowkey_columns = [
+        ('table_id', 'int'), ('request_id', 'varchar:64'), ('column_id', 'int')
+    ],
+    normal_columns = [
+        ('definition_version', 'int', 'false'),
+        ('rowkey_predicate', 'longtext', 'false'),
+        ('state', 'int', 'false'),
+        ('retry_count', 'int', 'false'),
+        ('max_retries', 'int', 'false'),
+        ('eligible_ts', 'timestamp', 'false'),
+        ('claim_owner', 'varchar:64', 'true'),
+        ('claim_epoch', 'int', 'false'),
+        ('lease_until', 'timestamp', 'true'),
+        ('input_payload', 'longtext', 'false'),
+        ('output_payload', 'longtext', 'true'),
+        ('error_code', 'int', 'false'),
+        ('error_message', 'varchar:2048', 'true'),
+    ]
+)
+
 
 
 # Reserved position (placeholder before this line)

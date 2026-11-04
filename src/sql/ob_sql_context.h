@@ -594,6 +594,8 @@ public:
 
   void reset()
   {
+    ai_column_refs_.reset();
+    ai_retry_table_id_ = ai_retry_column_id_ = 0;
     question_marks_count_ = 0;
     calculable_items_.reset();
     fetch_cur_time_ = true;
@@ -671,6 +673,9 @@ public:
   static const int64_t CALCULABLE_EXPR_NUM = 1;
   typedef common::ObSEArray<ObHiddenColumnItem, CALCULABLE_EXPR_NUM, common::ModulePageAllocator, true> CalculableItems;
 public:
+  uint64_t ai_retry_table_id_ = 0;
+  uint64_t ai_retry_column_id_ = 0;
+  common::ObSEArray<uint64_t, 8> ai_column_refs_; // table/column pairs explicitly referenced by SQL
   int64_t question_marks_count_;
   CalculableItems calculable_items_;
   //array binding param exprs, mark the all array binding param expr in the batch stmt

@@ -131,6 +131,8 @@ void ObPhysicalPlan::reset()
   param_columns_.reset();
   autoinc_params_.reset();
   stmt_need_privs_.reset();
+  ai_column_refs_.reset();
+  ai_retry_table_id_ = ai_retry_column_id_ = 0;
   vars_.reset();
   sql_expression_factory_.destroy();
   expr_op_factory_.destroy();
@@ -649,7 +651,7 @@ OB_SERIALIZE_MEMBER(ObPhysicalPlan,
                     need_switch_to_table_lock_worker_,
                     data_complement_gen_doc_id_,
                     px_parallel_rule_,
-                    px_worker_share_plan_enabled_);
+                    px_worker_share_plan_enabled_, ai_column_refs_, ai_retry_table_id_, ai_retry_column_id_);
 
 int ObPhysicalPlan::set_table_locations(const ObTablePartitionInfoArray &infos,
                                         ObSchemaGetterGuard &schema_guard)

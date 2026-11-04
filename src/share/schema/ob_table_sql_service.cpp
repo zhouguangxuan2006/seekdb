@@ -22,6 +22,11 @@
 #include "share/schema/ob_partition_sql_helper.h"
 #include "share/ob_timezone_mgr.h"
 
+#include "rapidjson/document.h"
+#include "rapidjson/writer.h"
+#include "rapidjson/stringbuffer.h"
+#include <string>
+
 namespace oceanbase
 {
 using namespace common;
@@ -810,6 +815,27 @@ int ObTableSqlService::drop_table(const ObTableSchema &table_schema,
       }
     }
   }
+  bool has_ai_column = false;
+  for (int64_t i = 0; i < table_schema.get_column_count(); ++i) {
+    const ObColumnSchemaV2 *column = table_schema.get_column_schema_by_idx(i);
+    has_ai_column |= column != nullptr && column->is_ai_column();
+  }
+  if (OB_SUCC(ret) && has_ai_column) {
+    int64_t affected_rows = 0;
+    sql.reuse();
+    if (OB_FAIL(sql.append_fmt("INSERT INTO __all_ai_column_history "
+        "(table_id,column_id,schema_version,is_deleted) "
+        "SELECT table_id,column_id,%ld,1 FROM __all_ai_column WHERE table_id=%lu",
+        new_schema_version, table_id))) {
+    } else if (OB_FAIL(sql_client.write(sql.ptr(), affected_rows))) {
+    }
+    for (const char *name : {"__all_ai_column_task", "__all_ai_column"}) {
+      sql.reuse();
+      if (OB_SUCC(ret) && OB_FAIL(sql.append_fmt("DELETE FROM %s WHERE table_id=%lu", name, table_id))) {
+      } else if (OB_SUCC(ret) && OB_FAIL(sql_client.write(sql.ptr(), affected_rows))) {
+      }
+    }
+  }
   return ret;
 }
 
@@ -993,6 +1019,72 @@ int ObTableSqlService::update_single_column(
   return ret;
 }
 
+// The caller supplies the DDL transaction. Never publish AI metadata through a
+// separate connection: rollback must remove both the columns and their definition.
+static int insert_ai_column_metadata(ObISQLClient &client, const ObColumnSchemaV2 &column,
+                                     uint64_t table_id, int64_t schema_version)
+{
+  int ret = OB_SUCCESS;
+  if (!column.is_ai_column()) return ret;
+  const ObString &info = column.get_ai_column_info();
+  rapidjson::Document doc;
+  doc.Parse(info.ptr(), info.length());
+  if (doc.HasParseError() || !doc.IsObject()) return OB_ERR_UNEXPECTED;
+  for (const char *key : {"expression", "model", "prompt"}) {
+    if (!doc.HasMember(key) || !doc[key].IsString()) return OB_ERR_UNEXPECTED;
+  }
+  for (const char *key : {"state_column_id", "request_column_id", "result_spec_column_id", "max_retries"}) {
+    if (!doc.HasMember(key) || !doc[key].IsUint64()) return OB_ERR_UNEXPECTED;
+  }
+  if (!doc.HasMember("dependencies") || !doc["dependencies"].IsArray()) return OB_ERR_UNEXPECTED;
+  rapidjson::StringBuffer dependency_buf;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(dependency_buf);
+  doc["dependencies"].Accept(writer);
+  std::string normalized(doc["expression"].GetString(), doc["expression"].GetStringLength());
+  if (doc["prompt"].GetStringLength() != 0) {
+    normalized += " /* ";
+    normalized.append(doc["prompt"].GetString(), doc["prompt"].GetStringLength());
+    normalized += " */";
+  }
+  ObDMLSqlSplicer dml;
+  if (OB_FAIL(dml.add_pk_column("table_id", table_id))
+      || OB_FAIL(dml.add_pk_column("column_id", column.get_column_id()))
+      || OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(column.get_column_name_str())))
+      || OB_FAIL(dml.add_column("definition_version", schema_version))
+      || OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(ObString(normalized.size(), normalized.data()))))
+      || OB_FAIL(dml.add_column("dependency_column_ids", ObHexEscapeSqlStr(ObString(dependency_buf.GetSize(), dependency_buf.GetString()))))
+      || OB_FAIL(dml.add_column("model_name", ObHexEscapeSqlStr(ObString(doc["model"].GetStringLength(), doc["model"].GetString()))))
+      || OB_FAIL(dml.add_column("sync_mode", "async"))
+      || OB_FAIL(dml.add_column("max_retries", doc["max_retries"].GetInt64()))
+      || OB_FAIL(dml.add_column("state_column_id", doc["state_column_id"].GetUint64()))
+      || OB_FAIL(dml.add_column("request_column_id", doc["request_column_id"].GetUint64()))
+      || OB_FAIL(dml.add_column("result_spec_column_id", doc["result_spec_column_id"].GetUint64()))
+      || OB_FAIL(dml.add_column("result_spec", ObHexEscapeSqlStr(info)))) {
+  } else {
+    int64_t affected_rows = 0;
+    ObDMLExecHelper exec(client);
+    if (OB_FAIL(exec.exec_insert("__all_ai_column", dml, affected_rows))) {
+    } else if (affected_rows != 1) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(dml.add_pk_column("schema_version", schema_version))
+        || OB_FAIL(dml.add_column("is_deleted", 0))) {
+    } else if (OB_FAIL(exec.exec_insert("__all_ai_column_history", dml, affected_rows))) {
+    }
+  }
+  return ret;
+}
+
+static int insert_table_ai_metadata(ObISQLClient &client, const ObTableSchema &table)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < table.get_column_count(); ++i) {
+    const ObColumnSchemaV2 *column = table.get_column_schema_by_idx(i);
+    if (column == nullptr) ret = OB_ERR_UNEXPECTED;
+    else ret = insert_ai_column_metadata(client, *column, table.get_table_id(), table.get_schema_version());
+  }
+  return ret;
+}
+
 int ObTableSqlService::add_columns(ObISQLClient &sql_client,
                                   const ObTableSchema &table)
 {
@@ -1085,6 +1177,11 @@ int ObTableSqlService::add_columns_dml(
   const int64_t schema_version = table.get_schema_version();
   
   
+  bool has_ai_column = false;
+  for (int64_t i = 0; i < table.get_column_count(); ++i) {
+    const ObColumnSchemaV2 *column = table.get_column_schema_by_idx(i);
+    has_ai_column |= column != nullptr && column->is_ai_column();
+  }
   column_count = 0;
   if (OB_FAIL(check_ddl_allowed(table))) {
   } else {
@@ -1101,6 +1198,8 @@ int ObTableSqlService::add_columns_dml(
         
         column.set_table_id(table.get_table_id());
         if (OB_FAIL(gen_column_dml(column, all_column_dml))) {
+        } else if (has_ai_column && !column.is_ai_column()
+                   && OB_FAIL(all_column_dml.add_column("ai_column_info", ObHexEscapeSqlStr(ObString())))) {
         } else if (OB_FAIL(all_column_dml.finish_row())) {
         } else {
           column_count++;
@@ -1144,6 +1243,9 @@ int ObTableSqlService::batch_add_columns_for_create_table(common::ObISQLClient &
     } else if (FALSE_IT(time_guard.click("insert_all_column_history"))) {
     }
   }
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); ++i) {
+    ret = insert_table_ai_metadata(sql_client, tables.at(i));
+  }
   return ret;
 }
 
@@ -1165,6 +1267,7 @@ int ObTableSqlService::add_columns_for_not_core(ObISQLClient &sql_client,
   } else if (OB_FAIL(dml.set_default_columns("is_deleted", "0"))) {
   } else if (OB_FAIL(exec_dml(sql_client, OB_ALL_COLUMN_HISTORY_TNAME, dml, column_count))) {
   }
+  if (OB_SUCC(ret)) ret = insert_table_ai_metadata(sql_client, table);
   return ret;
 }
 
@@ -1638,6 +1741,9 @@ int ObTableSqlService::add_single_column(ObISQLClient &sql_client,
     }
   }
 
+  if (OB_SUCC(ret) && !only_history) {
+    ret = insert_ai_column_metadata(sql_client, column, column.get_table_id(), column.get_schema_version());
+  }
   return ret;
 }
 
@@ -3218,6 +3324,7 @@ int ObTableSqlService::gen_column_dml_without_check(
                          || (OB_FAIL(dml.add_column("skip_index_attr", column.get_skip_index_attr().get_packed_value())))
                          || (OB_FAIL(dml.add_column("lob_chunk_size", column.get_lob_chunk_size())))
                          || (OB_FAIL(dml.add_column("local_session_vars", ObHexEscapeSqlStr(local_session_var))))
+                         || (column.is_ai_column() && OB_FAIL(dml.add_column("ai_column_info", ObHexEscapeSqlStr(column.get_ai_column_info()))))
                          || OB_FAIL(dml.add_gmt_create())
                          || OB_FAIL(dml.add_gmt_modified()))) {
     }

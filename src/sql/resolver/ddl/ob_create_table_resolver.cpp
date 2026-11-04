@@ -24,6 +24,7 @@
 #include "share/ob_server_struct.h"
 #include "sql/optimizer/ob_optimizer_util.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "sql/resolver/ddl/ai_column_schema_builder.h"
 #include "sql/resolver/ddl/ob_vec_index_builder_util.h"
 
 namespace oceanbase
@@ -950,6 +951,12 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       } else if (OB_FAIL(resolve_primary_key_node_in_heap_table(primary_node_in_heap_table, stats, resolved_cols))) {
       }
     }
+  }
+  if (OB_SUCC(ret) && node != nullptr && stmt_ != nullptr && RESOLVE_NON_COL != resolve_rule) {
+    ObTableSchema &table_schema = static_cast<ObCreateTableStmt *>(stmt_)->get_create_table_arg().schema_;
+    uint64_t last_column_id = cur_column_id_;
+    ret = build_ai_column_schemas(node, table_schema, last_column_id);
+    if (OB_SUCC(ret)) cur_column_id_ = last_column_id;
   }
   return ret;
 }

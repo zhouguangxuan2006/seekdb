@@ -21,6 +21,8 @@
 
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
 
+#include "rapidjson/document.h"
+
 namespace oceanbase
 {
 namespace share
@@ -212,6 +214,20 @@ int ObSchemaPrinter::print_table_definition_columns(const ObTableSchema &table_s
           if (OB_FAIL(print_generated_column_definition(*col, buf, buf_len, table_schema, pos))) {
           }
         }
+        if (OB_SUCC(ret) && col->is_ai_column()) {
+          const ObString &info = col->get_ai_column_info();
+          rapidjson::Document definition;
+          definition.Parse(info.ptr(), info.length());
+          if (definition.HasParseError() || !definition.IsObject()
+              || !definition.HasMember("expression") || !definition["expression"].IsString()
+              || !definition.HasMember("max_retries") || !definition["max_retries"].IsInt64()) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
+              " AI COLUMN (%.*s) WITH (sync_mode='async', max_retries=%ld)",
+              static_cast<int>(definition["expression"].GetStringLength()),
+              definition["expression"].GetString(), definition["max_retries"].GetInt64()))) {
+          }
+        }
         // mysql mode
         if (OB_SUCC(ret)) {
           if (!col->is_nullable()) {
@@ -231,7 +247,7 @@ int ObSchemaPrinter::print_table_definition_columns(const ObTableSchema &table_s
             SHARE_SCHEMA_LOG(WARN, "fail to print geometry srid", K(ret), K(srid));
           }
         }
-        if (OB_SUCC(ret) && !col->is_generated_column()) {
+        if (OB_SUCC(ret) && !col->is_generated_column() && !col->is_ai_column()) {
           //if column is not permit null and default value does not specify , don't  display DEFAULT NULL
           if (OB_SUCC(ret)) {
             if (!(ObNullType == col->get_cur_default_value().get_type() && !col->is_nullable())
