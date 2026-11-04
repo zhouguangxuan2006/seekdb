@@ -775,16 +775,26 @@ int ObAlterTableResolver::resolve_column_options(const ParseNode &node,
         ret = OB_ERR_UNEXPECTED;
         SQL_RESV_LOG(WARN, "invalid parse tree!", K(ret));
       } else {
-        bool contains_ai = false;
-        for (int64_t j = 0; j < table_schema_->get_column_count(); ++j) {
-          const ObColumnSchemaV2 *column = table_schema_->get_column_schema_by_idx(j);
-          contains_ai |= column != nullptr && column->is_ai_column();
-        }
-        if (contains_ai && column_node->type_ != T_COLUMN_ADD
-            && column_node->type_ != T_COLUMN_ADD_WITH_LOB_PARAMS) {
-          ret = OB_NOT_SUPPORTED;
-          LOG_USER_ERROR(OB_NOT_SUPPORTED, "changing existing AI table columns is not enabled");
-          break;
+        if (column_node->type_ == T_COLUMN_CHANGE || column_node->type_ == T_COLUMN_RENAME ||
+            column_node->type_ == T_COLUMN_ALTER) {
+          const ParseNode *ref = AiColumnDefinition::child(column_node, 0);
+          const ParseNode *name = ref != nullptr && ref->type_ == T_COLUMN_REF ? AiColumnDefinition::child(ref, 2) : ref;
+          const auto *target = name == nullptr ? nullptr : table_schema_->get_column_schema(
+              ObString(static_cast<int32_t>(name->str_len_), name->str_value_));
+          for (int64_t j = 0; target != nullptr && OB_SUCC(ret) && j < table_schema_->get_column_count(); ++j) {
+            const auto *candidate = table_schema_->get_column_schema_by_idx(j);
+            if (candidate == nullptr || !candidate->is_ai_column()) continue;
+            bool affected = candidate->get_column_id() == target->get_column_id();
+            rapidjson::Document info;
+            info.Parse(candidate->get_ai_column_info().ptr(), candidate->get_ai_column_info().length());
+            if (info.HasParseError() || !info.HasMember("dependencies")) { ret = OB_ERR_UNEXPECTED; break; }
+            for (const auto &dep : info["dependencies"].GetArray()) affected |= dep.GetUint64() == target->get_column_id();
+            if (affected) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "renaming or changing defaults of AI columns and their dependencies");
+            }
+          }
+          if (OB_FAIL(ret)) break;
         }
         switch(column_node->type_) {
         //add column
@@ -4142,6 +4152,39 @@ int ObAlterTableResolver::resolve_modify_column(const ParseNode &node,
           if (OB_FAIL(check_column_in_part_key(*table_schema_, *origin_col_schema, alter_column_schema))) {
           }
         }
+        if (OB_SUCC(ret) && origin_col_schema->is_ai_column()) {
+          const ParseNode *definition_node = node.children_[i];
+          if (definition_node->num_child_ != 5 || definition_node->children_[4] == nullptr) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "MODIFY of an AI column without its AI definition");
+          } else {
+            ObTableSchema complete;
+            uint64_t last_id = table_schema_->get_max_used_column_id();
+            if (OB_FAIL(complete.assign(*table_schema_))) {
+            } else {
+              auto *replacement = complete.get_column_schema(origin_col_schema->get_column_id());
+              if (replacement == nullptr) ret = OB_ERR_UNEXPECTED;
+              else if (OB_FAIL(replacement->assign(alter_column_schema))) {
+              } else if (OB_FAIL(replacement->set_ai_column_info(origin_col_schema->get_ai_column_info()))) {
+              }
+            }
+            ParseNode elements{};
+            ParseNode *children[] = {node.children_[i]};
+            elements.type_ = T_TABLE_ELEMENT_LIST;
+            elements.num_child_ = 1;
+            elements.children_ = children;
+            if (OB_SUCC(ret) && OB_FAIL(build_ai_column_schemas(&elements, complete, last_id))) {
+            } else if (OB_SUCC(ret)) {
+              const auto *resolved = complete.get_column_schema(origin_col_schema->get_column_id());
+              if (resolved == nullptr) ret = OB_ERR_UNEXPECTED;
+              else ret = alter_column_schema.set_ai_column_info(resolved->get_ai_column_info());
+              alter_column_schema.set_nullable(true);
+            }
+          }
+        } else if (OB_SUCC(ret) && node.children_[i]->num_child_ == 5 && node.children_[i]->children_[4] != nullptr) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "converting a regular column to an AI column; use ADD COLUMN");
+        }
         if (OB_SUCC(ret)) {
           if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
           }
@@ -4292,7 +4335,39 @@ int ObAlterTableResolver::resolve_drop_column(
                               true /* is_drop_column */))) {
         } else if (OB_FAIL(check_drop_column_is_partition_key(*table_schema_,
                                                               alter_column_schema.get_origin_column_name()))) {
-        } else if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))){
+        } else {
+          const auto *dropped = table_schema_->get_column_schema(alter_column_schema.get_origin_column_name());
+          if (dropped != nullptr) {
+            for (int64_t j = 0; OB_SUCC(ret) && j < table_schema_->get_column_count(); ++j) {
+              const auto *candidate = table_schema_->get_column_schema_by_idx(j);
+              if (candidate == nullptr || !candidate->is_ai_column()) continue;
+              rapidjson::Document info;
+              info.Parse(candidate->get_ai_column_info().ptr(), candidate->get_ai_column_info().length());
+              if (info.HasParseError() || !info.HasMember("dependencies")) { ret = OB_ERR_UNEXPECTED; break; }
+              for (const auto &dep : info["dependencies"].GetArray()) {
+                if (dep.GetUint64() == dropped->get_column_id()) {
+                  ret = OB_NOT_SUPPORTED;
+                  LOG_USER_ERROR(OB_NOT_SUPPORTED, "dropping a dependency of an AI column");
+                }
+              }
+            }
+            if (OB_SUCC(ret) && dropped->is_ai_column()) {
+              rapidjson::Document info;
+              info.Parse(dropped->get_ai_column_info().ptr(), dropped->get_ai_column_info().length());
+              for (const char *key : {"state_column_id", "request_column_id", "result_spec_column_id"}) {
+                const auto *hidden = table_schema_->get_column_schema(info[key].GetUint64());
+                AlterColumnSchema removal;
+                if (hidden == nullptr) ret = OB_ERR_UNEXPECTED;
+                else if (OB_SUCC(ret) && OB_FAIL(removal.ObColumnSchemaV2::assign(*hidden))) {
+                } else if (OB_SUCC(ret) && OB_FAIL(removal.set_origin_column_name(hidden->get_column_name_str()))) {
+                } else if (OB_SUCC(ret)) {
+                  removal.alter_type_ = OB_DDL_DROP_COLUMN;
+                  ret = alter_table_stmt->add_column(removal);
+                }
+              }
+            }
+          }
+          if (OB_SUCC(ret)) ret = alter_table_stmt->add_column(alter_column_schema);
         }
       }
       if (OB_SUCC(ret)) {

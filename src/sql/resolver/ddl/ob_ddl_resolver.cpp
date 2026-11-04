@@ -1775,12 +1775,6 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
   int ret = OB_SUCCESS;
   bool is_modify_column = stmt::T_ALTER_TABLE == stmt_->get_stmt_type()
                   && OB_DDL_MODIFY_COLUMN == (static_cast<AlterColumnSchema &>(column)).alter_type_;
-  if (is_modify_column && node != nullptr
-      && node->num_child_ == 5 && node->children_ != nullptr && node->children_[4] != nullptr
-      && node->children_[4]->type_ == T_AI_COLUMN_DEFINITION) {
-    LOG_USER_ERROR(OB_NOT_SUPPORTED, "ALTER AI COLUMN schema integration is not enabled");
-    return OB_NOT_SUPPORTED;
-  }
   ParseNode *column_definition_ref_node = NULL;
   if (T_COLUMN_DEFINITION != node->type_ || node->num_child_ < COLUMN_DEFINITION_NUM_CHILD ||
      OB_ISNULL(allocator_) || OB_ISNULL(node->children_) || OB_ISNULL(node->children_[0]) ||

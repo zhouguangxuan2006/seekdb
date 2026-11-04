@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/engine/expr/ob_expr_ai/ai_column_internal.h"
+#include "rapidjson/document.h"
 #include "ob_del_upd_resolver.h"
 #include "sql/resolver/dml/ob_default_value_utils.h"
 #include "sql/resolver/dml/ob_update_stmt.h"
@@ -479,6 +480,31 @@ int ObDelUpdResolver::check_update_vector_col_with_vector_index(const ObTableSch
       }
     }
   }
+  // AI results are implicit assignments, added after this check. Treat a
+  // dependency/retry update as a vector update so native VID generation and
+  // vector-index invalidation are planned before those assignments are added.
+  if (OB_SUCC(ret) && !update_with_vector_index && !AiColumnInternalAccess::contains(session_info_)) {
+    for (int64_t i = 0; OB_SUCC(ret) && !update_with_vector_index && i < table_schema->get_column_count(); ++i) {
+      const auto *column = table_schema->get_column_schema_by_idx(i);
+      if (column == nullptr || !column->is_ai_column() || !column->is_collection()) continue;
+      rapidjson::Document info;
+      info.Parse(column->get_ai_column_info().ptr(), column->get_ai_column_info().length());
+      if (info.HasParseError() || !info.HasMember("dependencies")) { ret = OB_ERR_UNEXPECTED; break; }
+      bool affected = params_.query_ctx_ != nullptr && params_.query_ctx_->ai_retry_table_id_ == table_schema->get_table_id() &&
+          params_.query_ctx_->ai_retry_column_id_ == column->get_column_id();
+      for (int64_t assignment_idx = 0; assignment_idx < assigns.count(); ++assignment_idx) {
+        const ObAssignment &assignment = assigns.at(assignment_idx);
+        const uint64_t assigned = assignment.column_expr_->get_column_id();
+        affected |= has_exist_in_array(row_key_col_ids, assigned);
+        for (const auto &dep : info["dependencies"].GetArray()) affected |= dep.GetUint64() == assigned;
+      }
+      if (affected) {
+        ret = ObVectorIndexUtil::check_column_has_vector_index(*table_schema, *schema_guard,
+            column->get_column_id(), update_with_vector_index, index_type);
+      }
+    }
+  }
+
   return ret;
 }
 
@@ -1860,8 +1886,16 @@ int ObDelUpdResolver::generate_column_conv_function(ObInsertTableInfo &table_inf
         }
       }
       for (int64_t i = 0; OB_SUCC(ret) && i < table_info.column_conv_exprs_.count(); ++i) {
-        ObRawExpr *&expr = table_info.column_conv_exprs_.at(i);
-        if (OB_FAIL(ObRawExprUtils::build_wrapper_inner_expr(*params_.expr_factory_, *session_info_, expr, expr))) {}
+        const auto *column = schema->get_column_schema(table_info.column_exprs_.at(i)->get_column_id());
+        if (column == nullptr) { ret = OB_ERR_UNEXPECTED; break; }
+        const ObString &name = column->get_column_name_str();
+        const bool ai_state = column->is_hidden() && name.length() >= 5 && MEMCMP(name.ptr(), "__ai_", 5) == 0;
+        // Only frame slots mutated by the AI hook need a wrapper. Native hidden
+        // primary-key/autoincrement expressions must remain visible to codegen.
+        if (column->is_ai_column() || ai_state) {
+          ObRawExpr *&expr = table_info.column_conv_exprs_.at(i);
+          if (OB_FAIL(ObRawExprUtils::build_wrapper_inner_expr(*params_.expr_factory_, *session_info_, expr, expr))) {}
+        }
       }
     }
   }

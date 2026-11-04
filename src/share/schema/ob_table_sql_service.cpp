@@ -23,6 +23,10 @@
 #include "share/ob_timezone_mgr.h"
 
 #include "rapidjson/document.h"
+#include "sql/engine/expr/ob_expr_ai/ai_column_internal.h"
+#include "query/session/ob_inner_sql_connection_access.h"
+#include "share/rc/ob_server_runtime.h"
+#include "share/schema/ob_multi_version_schema_service.h"
 #include "rapidjson/writer.h"
 #include "rapidjson/stringbuffer.h"
 #include <string>
@@ -938,6 +942,11 @@ int ObTableSqlService::insert_single_column(
   return ret;
 }
 
+static int replace_ai_column_metadata(ObISQLClient &client, const ObTableSchema &table,
+                                      const ObColumnSchemaV2 &column);
+static int delete_ai_column_metadata(ObISQLClient &client, uint64_t table_id, uint64_t column_id,
+                                     int64_t schema_version);
+
 int ObTableSqlService::update_single_column(
     ObISQLClient &sql_client,
     const ObTableSchema &origin_table_schema,
@@ -1016,6 +1025,12 @@ int ObTableSqlService::update_single_column(
     }
   }
 
+  const auto *old_column = origin_table_schema.get_column_schema(new_column_schema.get_column_id());
+  if (OB_SUCC(ret) && new_column_schema.is_ai_column() && old_column != nullptr &&
+      old_column->get_ai_column_info() != new_column_schema.get_ai_column_info()) {
+    ret = replace_ai_column_metadata(sql_client, origin_table_schema, new_column_schema);
+  }
+
   return ret;
 }
 
@@ -1050,7 +1065,7 @@ static int insert_ai_column_metadata(ObISQLClient &client, const ObColumnSchemaV
   if (OB_FAIL(dml.add_pk_column("table_id", table_id))
       || OB_FAIL(dml.add_pk_column("column_id", column.get_column_id()))
       || OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(column.get_column_name_str())))
-      || OB_FAIL(dml.add_column("definition_version", schema_version))
+      || OB_FAIL(dml.add_column("definition_version", doc.HasMember("definition_version") && doc["definition_version"].IsInt64() ? doc["definition_version"].GetInt64() : schema_version))
       || OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(ObString(normalized.size(), normalized.data()))))
       || OB_FAIL(dml.add_column("dependency_column_ids", ObHexEscapeSqlStr(ObString(dependency_buf.GetSize(), dependency_buf.GetString()))))
       || OB_FAIL(dml.add_column("model_name", ObHexEscapeSqlStr(ObString(doc["model"].GetStringLength(), doc["model"].GetString()))))
@@ -1072,6 +1087,61 @@ static int insert_ai_column_metadata(ObISQLClient &client, const ObColumnSchemaV
     }
   }
   return ret;
+}
+
+static int delete_ai_column_metadata(ObISQLClient &client, uint64_t table_id, uint64_t column_id,
+                                     int64_t schema_version)
+{
+  int ret = OB_SUCCESS;
+  int64_t affected = 0;
+  ObSqlString query;
+  if (OB_FAIL(query.append_fmt("INSERT INTO __all_ai_column_history "
+      "(table_id,column_id,schema_version,is_deleted) SELECT table_id,column_id,%ld,1 "
+      "FROM __all_ai_column WHERE table_id=%lu AND column_id=%lu", schema_version, table_id, column_id))) {
+  } else if (OB_FAIL(client.write(query.ptr(), affected))) {
+  }
+  for (const char *name : {"__all_ai_column_task", "__all_ai_column"}) {
+    query.reuse();
+    if (OB_SUCC(ret) && OB_FAIL(query.append_fmt("DELETE FROM %s WHERE table_id=%lu AND column_id=%lu", name, table_id, column_id))) {
+    } else if (OB_SUCC(ret) && OB_FAIL(client.write(query.ptr(), affected))) {
+    }
+  }
+  return ret;
+}
+
+static int replace_ai_column_metadata(ObISQLClient &client, const ObTableSchema &table,
+                                      const ObColumnSchemaV2 &column)
+{
+  int ret = OB_SUCCESS;
+  // Invalidate values and cancel old requests in the same DDL transaction.
+  // The normal UPDATE path maintains indexes; the worker only schedules rows
+  // with a NULL request identity after the new schema becomes visible.
+  ObSchemaGetterGuard guard;
+  const ObDatabaseSchema *database = nullptr;
+  if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(guard)) ||
+      OB_FAIL(guard.get_database_schema(table.get_database_id(), database))) return ret;
+  if (database == nullptr) return OB_ERR_BAD_DATABASE;
+  auto ident = [](const ObString &v) { return sql::ai_column_identifier(std::string(v.ptr(), v.length())); };
+  rapidjson::Document info;
+  info.Parse(column.get_ai_column_info().ptr(), column.get_ai_column_info().length());
+  if (info.HasParseError() || !info.IsObject()) return OB_ERR_UNEXPECTED;
+  const auto *state = table.get_column_schema(info["state_column_id"].GetUint64());
+  const auto *token = table.get_column_schema(info["request_column_id"].GetUint64());
+  if (state == nullptr || token == nullptr) return OB_ERR_UNEXPECTED;
+  sql::AiColumnInternalAccess access(query::ObInnerSQLConnectionAccess::get_session(client.get_connection()));
+  std::string query = "UPDATE /*+ USE_PLAN_CACHE(NONE) */ " + ident(database->get_database_name_str()) + "." +
+      ident(table.get_table_name_str()) + " SET " + ident(column.get_column_name_str()) + "=NULL," +
+      ident(state->get_column_name_str()) + "=0," + ident(token->get_column_name_str()) + "=NULL";
+  int64_t affected = 0;
+  if (OB_FAIL(client.write(query.c_str(), affected))) return ret;
+  // A replacement writes one new history version (not a delete plus an insert
+  // with the same history primary key).
+  for (const char *name : {"__all_ai_column_task", "__all_ai_column"}) {
+    query = "DELETE FROM " + std::string(name) + " WHERE table_id=" + std::to_string(table.get_table_id()) +
+        " AND column_id=" + std::to_string(column.get_column_id());
+    if (OB_FAIL(client.write(query.c_str(), affected))) return ret;
+  }
+  return insert_ai_column_metadata(client, column, table.get_table_id(), column.get_schema_version());
 }
 
 static int insert_table_ai_metadata(ObISQLClient &client, const ObTableSchema &table)
@@ -2148,6 +2218,10 @@ int ObTableSqlService::delete_single_column(
     opt.schema_version_ = new_schema_version;
     if (OB_FAIL(log_operation_wrapper(opt, sql_client))) {
     }
+  }
+
+  if (OB_SUCC(ret) && orig_column_schema.is_ai_column()) {
+    ret = delete_ai_column_metadata(sql_client, table_id, column_id, new_schema_version);
   }
 
   return ret;

@@ -633,7 +633,7 @@ int ObDMLService::process_insert_row(const ObInsCtDef &ins_ctdef,
     }
 
   }
-  if (OB_SUCC(ret) && !is_skipped && ins_ctdef.is_primary_index_) { ret = AiColumnDml::process(ins_ctdef, dml_op, AiColumnDml::Action::INSERT); if (OB_FAIL(ret)) LOG_WARN("AI column DML processing failed", K(ret), K(ins_ctdef.das_base_ctdef_.index_tid_)); }
+  if (OB_SUCC(ret) && !is_skipped && ins_ctdef.is_primary_index_ && !ins_ctdef.is_table_without_pk_) { ret = AiColumnDml::process(ins_ctdef, dml_op, AiColumnDml::Action::INSERT); if (OB_FAIL(ret)) LOG_WARN("AI column DML processing failed", K(ret), K(ins_ctdef.das_base_ctdef_.index_tid_)); }
   return ret;
 }
 

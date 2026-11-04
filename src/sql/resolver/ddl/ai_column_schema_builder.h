@@ -4,8 +4,10 @@
 #include "share/schema/ob_table_schema.h"
 #include "query/vector/ob_vector_index_util.h"
 #include "sql/engine/expr/ob_expr_ai/ob_ai_func_utils.h"
+#include "rapidjson/document.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/writer.h"
+#include "lib/time/ob_time_utility.h"
 
 namespace oceanbase { namespace sql {
 
@@ -94,7 +96,19 @@ inline int build_ai_column_schemas(const ParseNode *elements,
     uint64_t hidden_ids[3];
     // Allocate IDs before adding columns: add_column can invalidate schema pointers.
     const uint64_t result_id = column->get_column_id();
+    rapidjson::Document previous;
+    if (column->is_ai_column()) {
+      previous.Parse(column->get_ai_column_info().ptr(), column->get_ai_column_info().length());
+      if (previous.HasParseError() || !previous.IsObject()) return OB_ERR_UNEXPECTED;
+    }
+    const char *hidden_keys[] = {"state_column_id", "request_column_id", "result_spec_column_id"};
     for (int j = 0; j < 3; ++j) {
+      if (previous.IsObject()) {
+        if (!previous.HasMember(hidden_keys[j]) || !previous[hidden_keys[j]].IsUint64()) return OB_ERR_UNEXPECTED;
+        hidden_ids[j] = previous[hidden_keys[j]].GetUint64();
+        if (table.get_column_schema(hidden_ids[j]) == nullptr) return OB_ERR_UNEXPECTED;
+        continue;
+      }
       hidden_ids[j] = ++last_column_id;
       const std::string name = "__ai_" + std::to_string(result_id) + "_" + std::to_string(j);
       if (table.get_column_schema(ObString::make_string(name.c_str())) != nullptr) return OB_NOT_SUPPORTED;
@@ -120,6 +134,9 @@ inline int build_ai_column_schemas(const ParseNode *elements,
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     writer.StartObject();
     writer.Key("version"); writer.Int(1);
+    // Definition identity must survive unrelated schema edits (column ordering,
+    // index creation, etc.), which can change a column's schema_version.
+    writer.Key("definition_version"); writer.Int64(ObTimeUtility::current_time());
     writer.Key("expression"); writer.String(definition.expression.data(), definition.expression.size());
     writer.Key("model"); writer.String(definition.model.data(), definition.model.size());
     writer.Key("prompt"); writer.String(definition.result_prompt.data(), definition.result_prompt.size());

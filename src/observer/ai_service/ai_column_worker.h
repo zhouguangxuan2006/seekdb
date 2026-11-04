@@ -354,6 +354,71 @@ class AiColumnWorker : public lib::ThreadPool {
     }
     return publish(table,request);
   }
+  std::mutex backfill_mutex_;
+  int64_t backfill_ts_ = 0;
+  int64_t backfill_table_ = 0, backfill_column_ = 0;
+  void backfill_definitions() {
+    using namespace common;
+    std::unique_lock<std::mutex> lock(backfill_mutex_, std::try_to_lock);
+    const int64_t now = ObTimeUtility::current_time();
+    if (!lock.owns_lock() || now - backfill_ts_ < 1000000) return;
+    backfill_ts_ = now;
+    int64_t table_id = 0, column_id = 0;
+    {
+      ObMySQLProxy::MySQLResult result;
+      const String query = "SELECT table_id,column_id FROM oceanbase.__all_ai_column WHERE table_id>" + number(backfill_table_) +
+          " OR (table_id=" + number(backfill_table_) + " AND column_id>" + number(backfill_column_) + ") ORDER BY table_id,column_id LIMIT 1";
+      if (GCTX.sql_proxy_->read(result, query.c_str()) != OB_SUCCESS || result.get_result() == nullptr) return;
+      const int next = result.get_result()->next();
+      if (next == OB_ITER_END) { backfill_table_ = backfill_column_ = 0; return; }
+      if (next != OB_SUCCESS || result.get_result()->get_int("table_id", table_id) != OB_SUCCESS ||
+          result.get_result()->get_int("column_id", column_id) != OB_SUCCESS) return;
+    }
+    backfill_table_ = table_id; backfill_column_ = column_id;
+    share::schema::ObSchemaGetterGuard guard;
+    const share::schema::ObTableSchema *table = nullptr;
+    const share::schema::ObDatabaseSchema *database = nullptr;
+    if (GCTX.schema_service_->get_runtime_schema_guard(guard) != OB_SUCCESS ||
+        guard.get_table_schema(table_id, table) != OB_SUCCESS || table == nullptr ||
+        guard.get_database_schema(table->get_database_id(), database) != OB_SUCCESS || database == nullptr) return;
+    const auto *column = table->get_column_schema(column_id);
+    if (column == nullptr || !column->is_ai_column()) return;
+    rapidjson::Document info;
+    info.Parse(column->get_ai_column_info().ptr(), column->get_ai_column_info().length());
+    if (info.HasParseError() || !info.HasMember("request_column_id")) return;
+    const auto *token = table->get_column_schema(info["request_column_id"].GetUint64());
+    if (token == nullptr) return;
+    const String qualified = identifier(database->get_database_name_str()) + "." + identifier(table->get_table_name_str());
+    String key_expression;
+    for (int64_t i = 0; i < table->get_column_count(); ++i) {
+      const auto *key = table->get_column_schema_by_idx(i);
+      if (key == nullptr || !key->is_rowkey_column()) continue;
+      if (!key_expression.empty()) key_expression += "," + literal(" AND ") + ",";
+      const String name = identifier(key->get_column_name_str());
+      key_expression += literal(name + " = CONVERT(X'") + ",HEX(CAST(" + name + " AS CHAR CHARACTER SET utf8mb4))," + literal("' USING utf8mb4)");
+    }
+    if (key_expression.empty()) return;
+    std::vector<String> keys;
+    {
+      ObMySQLProxy::MySQLResult result;
+      const String query = "SELECT /*+ USE_PLAN_CACHE(NONE) */ CONCAT(" + key_expression + ") AS row_key FROM " + qualified +
+          " WHERE " + identifier(token->get_column_name_str()) + " IS NULL LIMIT 64";
+      if (GCTX.sql_proxy_->read(result, query.c_str()) != OB_SUCCESS || result.get_result() == nullptr) return;
+      while (result.get_result()->next() == OB_SUCCESS) {
+        String key; if (text(*result.get_result(), "row_key", key) != OB_SUCCESS) return;
+        keys.push_back(std::move(key));
+      }
+    }
+    for (const String &key : keys) {
+      if (has_set_stop()) break;
+      // RETRY uses native DML: concurrent writes/deletes are serialized and the
+      // NULL-token predicate is rechecked under the business row lock.
+      const String query = "ALTER TABLE " + qualified + " RETRY AI COLUMN " + identifier(column->get_column_name_str()) +
+          " WHERE " + identifier(token->get_column_name_str()) + " IS NULL AND " + key;
+      int64_t affected = 0;
+      GCTX.sql_proxy_->write(query.c_str(), affected);
+    }
+  }
 public:
   AiColumnWorker():lib::ThreadPool(4) {}
   void run1() override {
@@ -362,6 +427,7 @@ public:
     while(!has_set_stop()) {
       try {
         if(GCTX.sql_proxy_!=nullptr && GCTX.schema_service_!=nullptr && recover_after_restart()) {
+          backfill_definitions();
           char uuid[37]={};
           if(sql::ObExprUuid::gen_server_uuid(uuid,36)==OB_SUCCESS) {
             int64_t table=0; String request; std::vector<Task> tasks;

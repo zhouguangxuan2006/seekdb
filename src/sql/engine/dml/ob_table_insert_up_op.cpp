@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
+#include "sql/engine/dml/ai_column_dml.h"
 #include "ob_table_insert_up_op.h"
 #include "data_plane/blocksstable/ob_datum_row.h"
 #include "data_plane/blocksstable/ob_datum_row_iterator.h"
@@ -548,6 +549,8 @@ int ObTableInsertUpOp::try_insert_row(bool &is_skipped)
     } else if (OB_FAIL(calc_insert_tablet_loc(ins_ctdef, ins_rtdef, tablet_loc))) {
     } else if (ins_ctdef.is_table_without_pk_ &&
         OB_FAIL(ObDMLService::set_heap_table_hidden_pk(ins_ctdef, tablet_loc->tablet_id_, eval_ctx_))) {
+    } else if (ins_ctdef.is_primary_index_ && ins_ctdef.is_table_without_pk_ &&
+          OB_FAIL(AiColumnDml::process(ins_ctdef, *this, AiColumnDml::Action::INSERT))) {
     } else if (OB_FAIL(insert_row_to_das(ins_ctdef, ins_rtdef, tablet_loc, modify_row))) {
     } else if (need_after_row_process(ins_ctdef) && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {
     } 

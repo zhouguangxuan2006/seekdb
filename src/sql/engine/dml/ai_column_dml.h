@@ -130,7 +130,7 @@ private:
     std::string old_key, new_key;
     if (action != Action::INSERT && OB_FAIL(predicate(true, old_key))) return ret;
     if (action != Action::DELETE && OB_FAIL(predicate(false, new_key))) return ret;
-    struct Pending { const ObColumnSchemaV2 *column; std::string select; uint64_t state; uint64_t request; int64_t retries; };
+    struct Pending { const ObColumnSchemaV2 *column; std::string select; uint64_t state; uint64_t request; int64_t retries; int64_t version; };
     std::vector<Pending> pending;
     size_t captured_bytes = 0, payload_bytes = 0;
     for (int64_t i = 0; action != Action::DELETE && i < table->get_column_count(); ++i) {
@@ -165,7 +165,7 @@ private:
       if (!source.empty()) query += " FROM (SELECT " + source + ") AS __ai_inputs";
       captured_bytes += query.size();
       if (captured_bytes > 8 * 1024 * 1024) return OB_SIZE_OVERFLOW;
-      pending.push_back({column, query, meta["state_column_id"].GetUint64(), meta["request_column_id"].GetUint64(), meta["max_retries"].GetInt64()});
+      pending.push_back({column, query, meta["state_column_id"].GetUint64(), meta["request_column_id"].GetUint64(), meta["max_retries"].GetInt64(), meta.HasMember("definition_version") && meta["definition_version"].IsInt64() ? meta["definition_version"].GetInt64() : column->get_schema_version()});
     }
     if (action != Action::DELETE && pending.empty()) return ret;
     char request[37] = {};
@@ -214,12 +214,13 @@ private:
           const std::string sql = "INSERT INTO oceanbase.__all_ai_column_task "
               "(table_id,request_id,column_id,definition_version,rowkey_predicate,state,retry_count,max_retries,eligible_ts,input_payload,claim_epoch,error_code) VALUES(" +
               std::to_string(table->get_table_id()) + "," + ai_column_literal(request) + "," + std::to_string(task.column->get_column_id()) + "," +
-              std::to_string(task.column->get_schema_version()) + "," + ai_column_literal(new_key) + ",0,0," + std::to_string(task.retries) +
+              std::to_string(task.version) + "," + ai_column_literal(new_key) + ",0,0," + std::to_string(task.retries) +
               ",NOW(6)," + ai_column_literal(payload) + ",0,0)";
           ret = write(op, sql);
         }
       }
     }
+    std::map<ObExpr *, bool> changed_exprs;
     for (const auto &task : pending) {
       if (OB_FAIL(ret)) break;
       ObExpr *result = expr(def, task.column->get_column_id());
@@ -232,6 +233,28 @@ private:
       if (memory == nullptr) { ret = OB_ALLOCATE_MEMORY_FAILED; break; }
       MEMCPY(memory, request, 36); token->locate_datum_for_write(ctx).set_string(memory, 36);
       token->get_eval_info(ctx).evaluated_ = true;
+      changed_exprs[result] = changed_exprs[state] = changed_exprs[token] = true;
+    }
+    // Type/constraint checks may have evaluated generated index expressions
+    // before AI results were invalidated. Re-evaluate only expressions that
+    // depend on the changed new-row frames; old-row values stay untouched.
+    std::vector<std::pair<ObExpr *, bool>> stack;
+    for (int64_t i = 0; OB_SUCC(ret) && !changed_exprs.empty() && i < def.new_row_.count(); ++i) {
+      stack.emplace_back(def.new_row_.at(i), false);
+      while (!stack.empty()) {
+        const auto entry = stack.back(); stack.pop_back();
+        ObExpr *node = entry.first;
+        if (node == nullptr || changed_exprs.count(node) != 0) continue;
+        if (!entry.second) {
+          stack.emplace_back(node, true);
+          for (uint32_t arg = 0; arg < node->arg_cnt_; ++arg) stack.emplace_back(node->args_[arg], false);
+        } else {
+          bool changed = false;
+          for (uint32_t arg = 0; arg < node->arg_cnt_; ++arg) changed |= changed_exprs[node->args_[arg]];
+          changed_exprs[node] = changed;
+          if (changed) node->get_eval_info(ctx).clear_evaluated_flag();
+        }
+      }
     }
     return ret;
   }
