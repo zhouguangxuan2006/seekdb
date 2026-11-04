@@ -44,7 +44,28 @@ struct ObSRMergeCmp
   virtual ~ObSRMergeCmp() {}
 
   int init(sql::ObDatumMeta id_meta, const ObFixedArray<const ObDatum *, ObIAllocator> *iter_ids);
-  int cmp(const ObSRMergeItem &l, const ObSRMergeItem &r, int64_t &cmp_ret);
+  inline int cmp(const ObSRMergeItem &l, const ObSRMergeItem &r, int64_t &cmp_ret)
+  {
+    int ret = OB_SUCCESS;
+    if (!is_inited_) {
+      ret = OB_NOT_INIT;
+    } else {
+      const ObDatum &left = get_id_datum(l.iter_idx_);
+      const ObDatum &right = get_id_datum(r.iter_idx_);
+      if (is_binary_id_ && !left.is_null() && !right.is_null()
+          && left.len_ == sizeof(ObDocId) && right.len_ == sizeof(ObDocId)) {
+        // Fixed-size binary document IDs have exactly bytewise ordering. Keep
+        // the generic comparator for NULLs, other types and unexpected lengths.
+        cmp_ret = MEMCMP(left.ptr_, right.ptr_, sizeof(ObDocId));
+      } else {
+        int result = 0;
+        if (OB_SUCCESS == (ret = cmp_func_(left, right, result, nullptr))) {
+          cmp_ret = result;
+        }
+      }
+    }
+    return ret;
+  }
 private:
   inline const ObDatum &get_id_datum(const int64_t iter_idx)
   {
@@ -58,6 +79,7 @@ private:
   //       and avoid deep copy into merge heap here
   const ObFixedArray<const ObDatum *, ObIAllocator> *iter_ids_;
   bool is_inited_;
+  bool is_binary_id_;
 };
 
 typedef ObSimpleRowsMerger<ObSRMergeItem, ObSRMergeCmp> ObSRSimpleMerger;

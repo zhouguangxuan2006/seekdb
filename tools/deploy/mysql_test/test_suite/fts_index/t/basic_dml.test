@@ -1586,18 +1586,17 @@ CREATE TABLE fts_parser_name_test (
     content TEXT,
     FULLTEXT INDEX ctx(title, content)
 );
-let $rowkey_doc_table_id = query_get_value(SELECT table_id FROM oceanbase.__all_table WHERE index_type = 11 AND data_table_id = $data_table_id, table_id, 1);
+let $data_table_id = query_get_value(SELECT table_id FROM oceanbase.__all_table WHERE table_name = 'fts_parser_name_test' AND database_id = $database_id, table_id, 1);
 
-let $doc_rowkey_table_id = query_get_value(SELECT table_id FROM oceanbase.__all_table WHERE index_type = 12 AND data_table_id = $data_table_id, table_id, 1);
+
+# Heap tables use their document ID directly, without rowkey mapping tables.
+--replace_regex /data_table_id = [0-9]+/*/
+eval SELECT COUNT(*) AS mapping_tables FROM oceanbase.__all_table WHERE index_type IN (11, 12) AND data_table_id = $data_table_id;
 
 let $fts_index_table_id = query_get_value(SELECT table_id FROM oceanbase.__all_table WHERE index_type = 13 AND data_table_id = $data_table_id, table_id, 1);
 
 let $doc_word_table_id = query_get_value(SELECT table_id FROM oceanbase.__all_table WHERE index_type = 14 AND data_table_id = $data_table_id, table_id, 1);
 
---replace_regex /table_id = [0-9]+/*/g  /_[0-9]+/_*/g
-eval SELECT column_name, is_hidden FROM oceanbase.__all_column WHERE table_id = $rowkey_doc_table_id;
---replace_regex /table_id = [0-9]+/*/g  /_[0-9]+/_*/g
-eval SELECT column_name, is_hidden FROM oceanbase.__all_column WHERE table_id = $doc_rowkey_table_id;
 --replace_regex /table_id = [0-9]+/*/g  /_[0-9]+/_*/g
 eval SELECT column_name, is_hidden FROM oceanbase.__all_column WHERE table_id = $fts_index_table_id;
 --replace_regex /table_id = [0-9]+/*/g  /_[0-9]+/_*/g

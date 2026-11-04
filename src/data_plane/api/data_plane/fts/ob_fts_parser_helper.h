@@ -161,6 +161,8 @@ public:
       common::ObIAllocator *allocator,
       const common::ObString &parser_name,
       const common::ObString &parser_properties);
+  // Use the built-in default property values without a JSON round trip.
+  int init(common::ObIAllocator *allocator, const common::ObString &parser_name);
   /**
    * Split document into multiple words
    *
@@ -217,6 +219,8 @@ private:
       common::ObIAllocator &allocator,
       ObAddWord &add_word);
   int set_add_word_flag(const ObIFTParserDesc &ftparser_desc);
+  int init_impl(common::ObIAllocator *allocator, const common::ObString &parser_name,
+                const common::ObString &parser_properties, const bool use_defaults);
 private:
   common::ObIAllocator *allocator_;
   const ObIFTParserDesc *parser_desc_;

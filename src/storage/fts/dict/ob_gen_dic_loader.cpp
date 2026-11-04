@@ -125,6 +125,16 @@ int ObGenDicLoader::get_dic_loader(const ObString &parser_name,
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(dic_loader_key.init(parser_name, charset))) {
   } else {
+    {
+      TCRLockGuard guard(lock_);
+      ret = dic_loader_map_.get_refactored(dic_loader_key, dic_loader);
+      if (OB_SUCCESS == ret) {
+        return loader_handle.set_loader(dic_loader);
+      } else if (OB_HASH_NOT_EXIST != ret) {
+        return OB_ERR_UNEXPECTED;
+      }
+    }
+    // Another tokenizer may create the loader while the lock changes mode.
     TCWLockGuard guard(lock_);
     if (OB_FAIL(dic_loader_map_.get_refactored(dic_loader_key, dic_loader))) {
       if (OB_HASH_NOT_EXIST == ret) {

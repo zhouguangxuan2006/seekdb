@@ -329,18 +329,40 @@ int ObFTParseHelper::init(
     const common::ObString &parser_name,
     const common::ObString &parser_properties)
 {
+  return init_impl(allocator, parser_name, parser_properties, false);
+}
+
+int ObFTParseHelper::init(common::ObIAllocator *allocator, const common::ObString &parser_name)
+{
+  return init_impl(allocator, parser_name, ObString(), true);
+}
+
+int ObFTParseHelper::init_impl(
+    common::ObIAllocator *allocator,
+    const common::ObString &parser_name,
+    const common::ObString &parser_properties,
+    const bool use_defaults)
+{
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
   } else if (OB_ISNULL(allocator) || OB_UNLIKELY(parser_name.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parser_name_.parse_from_str(parser_name.ptr(), parser_name.length()))) {
-  } else if (OB_FAIL(parser_property_.parse_for_parser_helper(parser_name_, parser_properties))) {
+  } else if (use_defaults && FALSE_IT(parser_property_ = ObFTParserProperty())) {
+    // Keep defaults in ObFTParserProperty, the same source used by JSON validation.
+  } else if (!use_defaults && OB_FAIL(parser_property_.parse_for_parser_helper(parser_name_, parser_properties))) {
   } else if (OB_FAIL(parser_name_.get_desc(parser_desc_))) {
   } else if (OB_ISNULL(parser_desc_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(set_add_word_flag(*parser_desc_))) {
   } else {
+    if (use_defaults && parser_name_.is_ik()) {
+      // These are the same property identifiers installed by parse_for_parser_helper.
+      parser_property_.dict_table_ = ObString(ObFTSLiteral::CONFIG_NAME_DICT_TABLE);
+      parser_property_.stopword_table_ = ObString(ObFTSLiteral::CONFIG_NAME_STOPWORD_TABLE);
+      parser_property_.quantifier_table_ = ObString(ObFTSLiteral::CONFIG_NAME_QUANTIFIER_TABLE);
+    }
     allocator_ = allocator;
     is_inited_ = true;
   }

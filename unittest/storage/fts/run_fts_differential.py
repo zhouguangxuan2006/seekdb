@@ -2,7 +2,10 @@
 """Compare complete FTS results with a reference binary, including DML and rescan."""
 import argparse
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import json
+import os
 from pathlib import Path
 import random
 import socket
@@ -76,6 +79,47 @@ with instance():
     texts = ['', ' ', '!!!', 'lowercase 123', 'UPPERCASE MixedCase', '数据库全文检索',
              '中国人民银行', '3公斤一百二十三万元', 'a' * 200, ('数据库 index 123.4!\n' * 450)]
     texts += [' '.join(rng.choices(vocabulary, k=rng.randint(1, 30))) for _ in range(80)]
+    # Race first dictionary lookups, and verify concurrent callers against their
+    # own serial answers as well as the reference-binary snapshot.
+    barrier = threading.Barrier(4)
+    concurrent_queries = [f"SELECT TOKENIZE({literal(text)},'ik','[{{\"output\":\"all\"}}]');" * 16
+                          for text in texts[3:7]]
+    def concurrent_tokenize(query):
+        barrier.wait(timeout=30)
+        return sql(query)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        concurrent_answers = list(pool.map(concurrent_tokenize, concurrent_queries))
+    for query, result in zip(concurrent_queries, concurrent_answers):
+        if result != sql(query):
+            raise AssertionError('Concurrent tokenization differs from serial evaluation')
+        answers.append({'sql': query, 'result': result})
+
+    default_options = {
+        'ik': [{'ik_mode': 'smart'}],
+        'space': [{'min_token_size': 3}, {'max_token_size': 84}],
+        'beng': [{'min_token_size': 3}, {'max_token_size': 84}],
+        'ngram': [{'ngram_token_size': 2}],
+        'ngram2': [{'min_ngram_size': 2}, {'max_ngram_size': 3}],
+    }
+    option_text = literal('中国人民银行 数据库 ABC lowercase 123 ' + 'a' * 84)
+    for parser_name, options in default_options.items():
+        for output in ['all', 'default']:
+            implicit = json.dumps([{'output': output}])
+            explicit = json.dumps([{'output': output}, {'additional_args': options}])
+            q1 = f"SELECT TOKENIZE({option_text},'{parser_name}','{implicit}')"
+            q2 = f"SELECT TOKENIZE({option_text},'{parser_name}','{explicit}')"
+            capture(q1)
+            capture(q2)
+            if answers[-1]['result'] != answers[-2]['result']:
+                raise AssertionError('Built-in and explicit defaults differ: ' + parser_name)
+    for parser_name, options in [('ik', [{'ik_mode': 'max_word'}]),
+                                 ('beng', [{'min_token_size': 1}, {'max_token_size': 5}]),
+                                 ('ngram', [{'ngram_token_size': 3}]),
+                                 ('ik', [{'ik_mode': 'invalid'}]),
+                                 ('beng', [{'min_token_size': 9}, {'max_token_size': 2}])]:
+        config = json.dumps([{'output': 'all'}, {'additional_args': options}])
+        capture(f"SELECT TOKENIZE({option_text},'{parser_name}','{config}')", allow_error=True)
+    capture("SELECT TOKENIZE(txt,parser,config) FROM (SELECT 'ABC database' txt,'beng' parser,'[]' config UNION ALL SELECT '数据库全文','ik','[{\"additional_args\":[{\"ik_mode\":\"max_word\"}]}]' UNION ALL SELECT 'A B CD','space','[]') t", allow_error=True)
     for parser_name in ['ik', 'beng', 'space', 'ngram']:
         for text in texts:
             capture(f"SELECT TOKENIZE({literal(text)},'{parser_name}','[{{\"output\":\"all\"}}]')")
@@ -122,16 +166,25 @@ with instance():
         suite = repo / 'tools/deploy/mysql_test/test_suite/fts_index'
         results = base / 'mysqltest-results'
         results.mkdir(exist_ok=True)
-        for name in ['tokenize_function', 'domain_id_merge_with_compare_null', 'simple_query']:
+        sql("CREATE USER IF NOT EXISTS 'admin'@'%' IDENTIFIED BY ''; GRANT ALL PRIVILEGES ON *.* TO 'admin'@'%'; CREATE USER IF NOT EXISTS 'root@sys'@'%' IDENTIFIED BY ''; GRANT ALL PRIVILEGES ON *.* TO 'root@sys'@'%'")
+        sql("CALL DBMS_SCHEDULER.DISABLE('ASYNC_GATHER_STATS_JOB_PROC')")
+        public_status = {}
+        for test_file in sorted((suite / 't').glob('*.test')):
+            name = test_file.stem
             result = subprocess.run([str(repo / 'deps/3rd/u01/obclient/bin/mysqltest'),
                 '--host=127.0.0.1', '--port=' + str(args.port), '--user=root', '--database=test',
-                '--default-character-set=utf8mb4', '--test-file=' + str(suite / 't' / (name + '.test')),
+                '--default-character-set=utf8mb4', '--test-file=' + str(test_file),
                 '--result-file=' + str(suite / 'r/mysql' / (name + '.result')),
-                '--logdir=' + str(results)], cwd=repo / 'tools/deploy', capture_output=True, text=True, timeout=300)
+                '--logdir=' + str(results)], cwd=repo / 'tools/deploy', env=dict(os.environ, OBMYSQL_MS0='127.0.0.1',
+                    OBMYSQL_PORT=str(args.port), OBMYSQL_PWD=''), capture_output=True, text=True, timeout=900)
             (results / (name + '.output')).write_text(result.stdout + result.stderr)
             print('PUBLIC', name, result.returncode, flush=True)
+            public_status[name] = result.returncode
+            (results / 'status.json').write_text(json.dumps(public_status, indent=2))
             if result.returncode:
-                raise AssertionError(result.stdout + result.stderr)
+                print(result.stdout + result.stderr, flush=True)
+        if any(public_status.values()):
+            raise AssertionError('Public test failures: ' + str(public_status))
 Path(args.snapshot).write_text(json.dumps(answers, ensure_ascii=False, indent=2))
 if args.compare:
     expected = json.loads(Path(args.compare).read_text())
