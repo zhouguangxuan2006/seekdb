@@ -171,13 +171,6 @@ struct ObNullSafeDatumStrCmp
       cmp_ret = NULL_FIRST ? -1 : 1;
     } else if (OB_UNLIKELY(r.is_null())) {
       cmp_ret = NULL_FIRST ? 1 : -1;
-    } else if (CS_TYPE == CS_TYPE_UTF8MB4_GENERAL_CI && l.len_ == r.len_
-               && (l.len_ == 0 || (l.ptr_ != nullptr && r.ptr_ != nullptr
-                   && (l.ptr_ == r.ptr_ || 0 == MEMCMP(l.ptr_, r.ptr_, l.len_))))) {
-      // Identical bytes have identical collation weights, including trailing
-      // spaces. Repeated string keys need no Unicode decoding. Distinct byte
-      // strings still use the collation comparator (case/accent/padding rules).
-      cmp_ret = 0;
     } else {
       ret = datum_cmp::ObDatumStrCmp<CS_TYPE, WITH_END_SPACE>::cmp(l, r, cmp_ret);
     }

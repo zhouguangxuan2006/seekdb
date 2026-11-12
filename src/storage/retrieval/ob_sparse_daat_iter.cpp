@@ -73,7 +73,6 @@ ObSRDaaTIterImpl::ObSRDaaTIterImpl()
     merge_heap_(nullptr),
     use_small_merge_(false),
     relevance_collector_(nullptr),
-    inner_product_collector_(nullptr),
     iter_domain_ids_(),
     buffered_domain_ids_(),
     buffered_relevances_(),
@@ -99,7 +98,6 @@ int ObSRDaaTIterImpl::init(
     iter_param_ = &iter_param;
     dim_iters_ = &dim_iters;
     relevance_collector_ = &relevance_collector;
-    inner_product_collector_ = relevance_collector.as_inner_product();
     const int64_t max_batch_size = OB_MAX(iter_param_->eval_ctx_->max_batch_size_, iter_param_->max_batch_size_);
     if (iter_param_->id_proj_expr_->datum_meta_.type_ == common::ObUInt64Type) {
       set_datum_func_ = ObISparseRetrievalMergeIter::set_datum_int;
@@ -150,7 +148,6 @@ void ObSRDaaTIterImpl::reset()
     relevance_collector_ = nullptr;
   }
   use_small_merge_ = false;
-  inner_product_collector_ = nullptr;
   iter_domain_ids_.reset();
   buffered_domain_ids_.reset();
   buffered_relevances_.reset();
@@ -326,41 +323,34 @@ int ObSRDaaTIterImpl::collect_dims_by_id(const ObDatum *&id_datum, double &relev
   relevance = 0.0;
   got_valid_id = false;
 
-  auto collect_with = [&](auto &collector) {
-    auto collect = [&](auto &heap) {
-      while (OB_SUCC(ret) && !heap.empty() && !curr_doc_end) {
-        if (heap.is_unique_champion()) {
-          curr_doc_end = true;
-        }
-        if (OB_FAIL(heap.top(top_item))) {
-        } else if (OB_FAIL(collector.collect_one_dim(top_item->iter_idx_, top_item->relevance_))) {
-        } else if (FALSE_IT(iter_idx = top_item->iter_idx_)) {
-        } else if (OB_FAIL(heap.pop())) {
-        } else {
-          OB_ASSERT(next_round_cnt_ < next_round_iter_idxes_.count());
-          next_round_iter_idxes_.get_data()[next_round_cnt_++] = iter_idx;
-        }
+  auto collect = [&](auto &heap) {
+    while (OB_SUCC(ret) && !heap.empty() && !curr_doc_end) {
+      if (heap.is_unique_champion()) {
+        curr_doc_end = true;
       }
-    };
-    if (use_small_merge_) {
-      collect(*static_cast<SmallDaaTMerger *>(merge_heap_));
-    } else {
-      collect(*merge_heap_);
-    }
-
-    if (OB_SUCC(ret)) {
-      id_datum = iter_domain_ids_.get_data()[iter_idx];
-      if (OB_ISNULL(id_datum)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (OB_FAIL(collector.get_result(relevance, got_valid_id))) {
-      } else if (got_valid_id && OB_FAIL(process_collected_row(*id_datum, relevance))) {
+      if (OB_FAIL(heap.top(top_item))) {
+      } else if (OB_FAIL(relevance_collector_->collect_one_dim(top_item->iter_idx_, top_item->relevance_))) {
+      } else if (FALSE_IT(iter_idx = top_item->iter_idx_)) {
+      } else if (OB_FAIL(heap.pop())) {
+      } else {
+        OB_ASSERT(next_round_cnt_ < next_round_iter_idxes_.count());
+        next_round_iter_idxes_.get_data()[next_round_cnt_++] = iter_idx;
       }
     }
   };
-  if (inner_product_collector_ != nullptr) {
-    collect_with(*inner_product_collector_);
+  if (use_small_merge_) {
+    collect(*static_cast<SmallDaaTMerger *>(merge_heap_));
   } else {
-    collect_with(*relevance_collector_);
+    collect(*merge_heap_);
+  }
+
+  if (OB_SUCC(ret)) {
+    id_datum = iter_domain_ids_.get_data()[iter_idx];
+    if (OB_ISNULL(id_datum)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(relevance_collector_->get_result(relevance, got_valid_id))) {
+    } else if (got_valid_id && OB_FAIL(process_collected_row(*id_datum, relevance))) {
+    }
   }
 
   return ret;

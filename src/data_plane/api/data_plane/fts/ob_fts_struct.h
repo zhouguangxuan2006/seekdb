@@ -51,10 +51,7 @@ private:
   ObObjMeta meta_;
 };
 
-// A document's word map is owned by one synchronous segmentation call (the
-// TOKENIZE evaluator or index-row builder). Dictionaries/stopword sets remain
-// shared and keep their own synchronization; this scratch map is never shared.
-typedef common::hash::ObHashMap<ObFTWord, int64_t, common::hash::NoPthreadDefendMode> ObFTWordMap;
+typedef common::hash::ObHashMap<ObFTWord, int64_t> ObFTWordMap;
 
 class ObAddWordFlag final
 {

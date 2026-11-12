@@ -108,14 +108,12 @@ public:
       K_(next_round_iter_idxes), K_(next_round_cnt));
 protected:
   virtual int pre_process();
-  // Shared merge mechanics have no derived overrides; keep only the genuine
-  // pre_process/process_collected_row/project_results extension points dynamic.
-  virtual int do_one_merge_round(int64_t &count) final;
-  virtual int fill_merge_heap() final;
-  virtual int collect_dims_by_id(const ObDatum *&id_datum, double &relevance, bool &got_valid_id) final;
+  virtual int do_one_merge_round(int64_t &count);
+  virtual int fill_merge_heap();
+  virtual int collect_dims_by_id(const ObDatum *&id_datum, double &relevance, bool &got_valid_id);
   virtual int process_collected_row(const ObDatum &id_datum, const double relevance);
-  virtual int filter_on_demand(const int64_t count, const double relevance, bool &need_project) final;
-  virtual int cache_result(int64_t &count, const ObDatum &id_datum, const double relevance) final;
+  virtual int filter_on_demand(const int64_t count, const double relevance, bool &need_project);
+  virtual int cache_result(int64_t &count, const ObDatum &id_datum, const double relevance);
   virtual int project_results(const int64_t count);
   int init_merge_heap(const int64_t count);
 protected:
@@ -126,7 +124,6 @@ protected:
   ObSRMergeHeap *merge_heap_;
   bool use_small_merge_; // Actual allocated heap type; retained across reuse.
   ObSRDaaTRelevanceCollector *relevance_collector_;
-  ObSRDaaTInnerProductRelevanceCollector *inner_product_collector_;
   ObFixedArray<const ObDatum *, ObIAllocator> iter_domain_ids_; // record every dim iter's output domain id, one (ObDatum *) for one dim iter
   ObFixedArray<ObDocIdExt, ObIAllocator> buffered_domain_ids_; // cache for output
   ObFixedArray<double, ObIAllocator> buffered_relevances_;
