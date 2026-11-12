@@ -95,10 +95,15 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
   } else {
     const char *doc = input_doc_->ptr_;
     const uint32_t doc_len = get_input_buf_len();
+    const bool utf8_ascii = cs_->number == CS_TYPE_UTF8MB4_GENERAL_CI;
+    auto char_length = [&](const char *p) -> int64_t {
+      return utf8_ascii && static_cast<unsigned char>(*p) < 0x80
+          ? 1 : ob_mbcharlen_ptr(cs_, p, doc + doc_len);
+    };
     int64_t token_len = 0;
     // to next non-whitespace pos
     while (OB_SUCC(ret) && found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = char_length(doc + trav_pos_);
       trav_pos_ += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {// if char is invalid, just skip the rest of document
         iter_end_ = true;
@@ -112,7 +117,7 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
     // to next whitespace pos
     while (OB_SUCC(ret) && !found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = char_length(doc + trav_pos_);
       trav_pos_ += c_len;
       token_len += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {
@@ -295,7 +300,31 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
     } else {
       ObString norm_alnum_token(norm_token_len, norm_token_ptr);
       ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      // In the default UTF-8 collation, lowercase ASCII is already normalized.
+      // The input stream keeps its token valid until the next get_next call,
+      // just like norm_allocator_; avoid allocating and copying unchanged bytes.
+      bool all_ascii = cs_->number == CS_TYPE_UTF8MB4_GENERAL_CI;
+      bool needs_lower = false;
+      for (uint32_t i = 0; all_ascii && i < norm_token_len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(norm_token_ptr[i]);
+        all_ascii = c < 0x80;
+        needs_lower |= c >= 'A' && c <= 'Z';
+      }
+      if (all_ascii && !needs_lower) {
+        next_token.set_string(norm_alnum_token);
+      } else if (all_ascii) {
+        char *lower = static_cast<char *>(norm_allocator_.alloc(static_cast<int64_t>(norm_token_len) + 1));
+        if (OB_ISNULL(lower)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          for (uint32_t i = 0; i < norm_token_len; ++i) {
+            const unsigned char c = static_cast<unsigned char>(norm_token_ptr[i]);
+            lower[i] = c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
+          }
+          lower[norm_token_len] = '\0';
+          next_token.set_string(ObString(norm_token_len, lower));
+        }
+      } else if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
       } else {
         next_token.set_string(norm_lower_token);
       }
