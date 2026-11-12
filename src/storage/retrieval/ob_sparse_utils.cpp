@@ -44,24 +44,6 @@ void ObSRDaaTInnerProductRelevanceCollector::reuse()
   matched_cnt_ = 0;
 }
 
-int ObSRDaaTInnerProductRelevanceCollector::collect_one_dim(const int64_t dim_idx, const double relevance)
-{
-  int ret = OB_SUCCESS;
-  total_relevance_ += relevance;
-  matched_cnt_ ++;
-  return ret;
-}
-
-int ObSRDaaTInnerProductRelevanceCollector::get_result(double &relevance, bool &is_valid)
-{
-  int ret = OB_SUCCESS;
-  relevance = total_relevance_;
-  is_valid = matched_cnt_ >= should_match_;
-  total_relevance_ = 0.0;
-  matched_cnt_ = 0;
-  return ret;
-}
-
 int ObSRDaaTBooleanRelevanceCollector::init(
     ObIAllocator *allocator,
     const int64_t dim_cnt,
