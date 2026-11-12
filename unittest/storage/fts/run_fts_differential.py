@@ -94,6 +94,13 @@ with instance():
             raise AssertionError('Concurrent tokenization differs from serial evaluation')
         answers.append({'sql': query, 'result': result})
 
+    # Grouping must retain the original frequency and last representation of
+    # keys with equal collation weights, including repeated accented tokens.
+    for parser_name in ['ik', 'beng', 'space', 'ngram', 'ngram2']:
+        for text in ['cafe café CAFÉ cafe CAFÉ', 'e é E É e é' * 80,
+                     'index INDEX index 中文 中文 𠀀 𠀀 ' * 100]:
+            capture(f"SELECT TOKENIZE({literal(text)},'{parser_name}','[{{\"output\":\"all\"}}]')")
+
     default_options = {
         'ik': [{'ik_mode': 'smart'}],
         'space': [{'min_token_size': 3}, {'max_token_size': 84}],
@@ -152,6 +159,28 @@ with instance():
             for limit in ['', ' LIMIT 97 OFFSET 3']:
                 capture(f"SELECT /*+ opt_param('enable_newsort','false') */ id,{expr} AS k "
                         f"FROM fts_regression.docs ORDER BY k {order},note DESC,id{limit}")
+    # Compare repeated byte strings and distinct strings with equal collation
+    # weights. Include empty/NULL values, embedded NULs, trailing spaces,
+    # accents and supplementary characters across sort/group/join operations.
+    sql("CREATE TABLE fts_regression.string_keys(id INT PRIMARY KEY, s VARCHAR(1024) CHARACTER SET utf8mb4)")
+    key_values = [None, '', ' ', 'a', 'A', 'a ', 'a  ', 'a\x00', 'ä', 'Ä',
+                  'é', 'e', 'ｅ', 'ß', 'ss', '中文', '𠀀', '🙂', 'prefix' * 100]
+    key_rows = [f"({i}," + ('NULL' if value is None else literal(value)) + ')'
+                for i, value in enumerate(key_values * 4, 1)]
+    sql('INSERT INTO fts_regression.string_keys VALUES ' + ','.join(key_rows))
+    for collation in ['utf8mb4_general_ci', 'utf8mb4_unicode_ci', 'utf8mb4_bin']:
+        key = f's COLLATE {collation}'
+        for newsort in ['false', 'true']:
+            for order in ['ASC', 'DESC']:
+                capture(f"SELECT /*+ opt_param('enable_newsort','{newsort}') */ id,HEX(s) "
+                        f"FROM fts_regression.string_keys ORDER BY {key} {order},id",
+                        allow_error=(newsort == 'true' and collation == 'utf8mb4_unicode_ci'))
+        capture(f"SELECT MIN(id),COUNT(*),GROUP_CONCAT(id ORDER BY id) "
+                f"FROM fts_regression.string_keys GROUP BY {key} ORDER BY MIN(id)")
+        capture(f"SELECT COUNT(DISTINCT {key}) FROM fts_regression.string_keys")
+        capture(f"SELECT a.id,b.id FROM fts_regression.string_keys a "
+                f"JOIN fts_regression.string_keys b ON a.s COLLATE {collation}=b.s COLLATE {collation} "
+                f"WHERE a.id<=19 ORDER BY a.id,b.id")
     sql('ALTER TABLE fts_regression.docs ADD FULLTEXT INDEX f_ik(title,body) WITH PARSER ik')
     sql('ALTER TABLE fts_regression.docs ADD FULLTEXT INDEX f_beng(body) WITH PARSER beng')
 
