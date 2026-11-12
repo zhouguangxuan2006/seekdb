@@ -142,13 +142,26 @@ with instance():
         rows.append(f'({i},{literal(title)},{literal(body)},{i % 7})')
     for start in range(0, len(rows), 100):
         sql('INSERT INTO fts_regression.docs VALUES ' + ','.join(rows[start:start+100]))
+    # Exercise the shared comparison path on ordinary SQL, including NULLs,
+    # collation ties, mixed directions and several datum types. IDs break ties
+    # so complete output is deterministic across reference and candidate builds.
+    for expr in ['body COLLATE utf8mb4_general_ci', 'body COLLATE utf8mb4_bin',
+                 "IF(id%7=0,NULL,body)", 'MOD(id,17)', 'CAST(id/7 AS DECIMAL(12,3))',
+                 "DATE_ADD('2020-01-01', INTERVAL MOD(id,31) DAY)"]:
+        for order in ['ASC', 'DESC']:
+            for limit in ['', ' LIMIT 97 OFFSET 3']:
+                capture(f"SELECT /*+ opt_param('enable_newsort','false') */ id,{expr} AS k "
+                        f"FROM fts_regression.docs ORDER BY k {order},note DESC,id{limit}")
     sql('ALTER TABLE fts_regression.docs ADD FULLTEXT INDEX f_ik(title,body) WITH PARSER ik')
     sql('ALTER TABLE fts_regression.docs ADD FULLTEXT INDEX f_beng(body) WITH PARSER beng')
 
     def query_cases():
         for columns in ['title,body', 'body']:
             for term in ['database', '全文 数据库', 'query index', 'notpresent', 'index 中文',
-                         'the and', 'UPPER MixedCase', '+database -query', 'data*']:
+                         'the and', 'UPPER MixedCase', '+database -query', 'data*',
+                         'database query index', 'database query index 中文 全文',
+                         'database database query', '+database +query -index',
+                         'database absenttoken query anothermissingtoken']:
                 for mode in ['', ' IN BOOLEAN MODE']:
                     match = f'MATCH({columns}) AGAINST({literal(term)}{mode})'
                     # Compare IDs and full precision scores, not only hit counts.

@@ -1,5 +1,9 @@
 # Full-text hot-path tuning
 
+This document records the first shipped optimization. See the
+[DAAT merge follow-up](fts-daat-merge-tuning.md) for the subsequent change and its
+separate comparison against that shipped version.
+
 ## Scope and evidence
 
 The reference is commit `8e0a7d05985f3a56bc3c32b47736acf3203116f8`, which
