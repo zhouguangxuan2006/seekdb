@@ -19,6 +19,7 @@ parser.add_argument('--snapshot', required=True)
 parser.add_argument('--compare')
 parser.add_argument('--port', type=int, default=2892)
 parser.add_argument('--public', action='store_true')
+parser.add_argument('--expect-filter-only', action='store_true')
 args = parser.parse_args()
 repo = Path(__file__).resolve().parents[3]
 base = Path(args.base_dir).resolve()
@@ -94,6 +95,35 @@ with instance():
             raise AssertionError('Concurrent tokenization differs from serial evaluation')
         answers.append({'sql': query, 'result': result})
 
+    # Grouping must retain the original frequency and last representation of
+    # keys with equal collation weights, including repeated accented tokens.
+    for parser_name in ['ik', 'beng', 'space', 'ngram', 'ngram2']:
+        for text in ['cafe café CAFÉ cafe CAFÉ', 'e é E É e é' * 80,
+                     'index INDEX index 中文 中文 𠀀 𠀀 ' * 100]:
+            capture(f"SELECT TOKENIZE({literal(text)},'{parser_name}','[{{\"output\":\"all\"}}]')")
+
+    # Exercise shared immutable stopwords with concurrent callers from all
+    # built-in tokenizers, comparing each caller to its own serial result.
+    for parser_name in ['beng', 'space', 'ngram', 'ngram2']:
+        barrier = threading.Barrier(4)
+        queries = [f"SELECT TOKENIZE({literal(text)},'{parser_name}','[{{\"output\":\"all\"}}]');" * 16
+                   for text in ['the and FROM where café café', 'lowercase lower UPPER lower',
+                                '中文 index index FULLTEXT 123', 'alpha beta gamma ' * 80]]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(concurrent_tokenize, queries))
+        for query, result in zip(queries, results):
+            if result != sql(query):
+                raise AssertionError('Concurrent parser differs from serial: ' + parser_name)
+            answers.append({'sql': query, 'result': result})
+    # ASCII width/normalization fast paths must retain every delimiter and
+    # mixed-charset fallback, including embedded NUL and non-ASCII suffixes.
+    english_boundaries = [''.join('alpha' + chr(c) + 'beta ' for c in range(128)),
+                          'lowercase ' * 120, 'lower UPPER lowercase café 中文 İı 𠀀',
+                          'alpha\x00beta\tGAMMA\r\ndelta...epsilon__zeta']
+    for collation in ['utf8mb4_general_ci', 'utf8mb4_unicode_ci', 'utf8mb4_bin']:
+        for text in english_boundaries:
+            capture(f"SELECT TOKENIZE({literal(text)} COLLATE {collation},'beng','[{{\"output\":\"all\"}}]')")
+
     default_options = {
         'ik': [{'ik_mode': 'smart'}],
         'space': [{'min_token_size': 3}, {'max_token_size': 84}],
@@ -152,6 +182,45 @@ with instance():
             for limit in ['', ' LIMIT 97 OFFSET 3']:
                 capture(f"SELECT /*+ opt_param('enable_newsort','false') */ id,{expr} AS k "
                         f"FROM fts_regression.docs ORDER BY k {order},note DESC,id{limit}")
+    # Compare repeated byte strings and distinct strings with equal collation
+    # weights. Include empty/NULL values, embedded NULs, trailing spaces,
+    # accents and supplementary characters across sort/group/join operations.
+    sql("CREATE TABLE fts_regression.string_keys(id INT PRIMARY KEY, s VARCHAR(1024) CHARACTER SET utf8mb4)")
+    key_values = [None, '', ' ', 'a', 'A', 'a ', 'a  ', 'a\x00', 'ä', 'Ä',
+                  'é', 'e', 'ｅ', 'ß', 'ss', '中文', '𠀀', '🙂', 'prefix' * 100]
+    key_rows = [f"({i}," + ('NULL' if value is None else literal(value)) + ')'
+                for i, value in enumerate(key_values * 4, 1)]
+    sql('INSERT INTO fts_regression.string_keys VALUES ' + ','.join(key_rows))
+    for collation in ['utf8mb4_general_ci', 'utf8mb4_unicode_ci', 'utf8mb4_bin']:
+        key = f's COLLATE {collation}'
+        for newsort in ['false', 'true']:
+            for order in ['ASC', 'DESC']:
+                capture(f"SELECT /*+ opt_param('enable_newsort','{newsort}') */ id,HEX(s) "
+                        f"FROM fts_regression.string_keys ORDER BY {key} {order},id",
+                        allow_error=(newsort == 'true' and collation == 'utf8mb4_unicode_ci'))
+        capture(f"SELECT MIN(id),COUNT(*),GROUP_CONCAT(id ORDER BY id) "
+                f"FROM fts_regression.string_keys GROUP BY {key} ORDER BY MIN(id)")
+        capture(f"SELECT COUNT(DISTINCT {key}) FROM fts_regression.string_keys")
+        capture(f"SELECT a.id,b.id FROM fts_regression.string_keys a "
+                f"JOIN fts_regression.string_keys b ON a.s COLLATE {collation}=b.s COLLATE {collation} "
+                f"WHERE a.id<=19 ORDER BY a.id,b.id")
+    # Exhaust ASCII weights and fallback boundaries without encoding raw
+    # controls in the SQL output. Compare complete sorted IDs and group members.
+    sql("CREATE TABLE fts_regression.ascii_keys(id INT PRIMARY KEY, s VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci)")
+    ascii_values = [prefix + chr(c) + suffix
+                    for prefix in ['', 'aA', 'sameprefix']
+                    for c in range(128)
+                    for suffix in ['', ' ', '  ', 'é中文🙂']]
+    ascii_rows = [f"({i},{literal(value)})" for i, value in enumerate(ascii_values, 1)]
+    for start in range(0, len(ascii_rows), 100):
+        sql('INSERT INTO fts_regression.ascii_keys VALUES ' + ','.join(ascii_rows[start:start+100]))
+    for newsort in ['false', 'true']:
+        for order in ['ASC', 'DESC']:
+            capture(f"SELECT /*+ opt_param('enable_newsort','{newsort}') */ id,HEX(s) "
+                    f"FROM fts_regression.ascii_keys ORDER BY s {order},id")
+    capture("SELECT MIN(id),COUNT(*),GROUP_CONCAT(id ORDER BY id) FROM fts_regression.ascii_keys GROUP BY s ORDER BY MIN(id)")
+    capture("SELECT COUNT(DISTINCT s) FROM fts_regression.ascii_keys")
+
     sql('ALTER TABLE fts_regression.docs ADD FULLTEXT INDEX f_ik(title,body) WITH PARSER ik')
     sql('ALTER TABLE fts_regression.docs ADD FULLTEXT INDEX f_beng(body) WITH PARSER beng')
 
@@ -164,10 +233,76 @@ with instance():
                          'database absenttoken query anothermissingtoken']:
                 for mode in ['', ' IN BOOLEAN MODE']:
                     match = f'MATCH({columns}) AGAINST({literal(term)}{mode})'
+                    # Membership-only scans must return the full same row set,
+                    # including empty results, Boolean mode and post-DML reads.
+                    capture(f'SELECT id FROM fts_regression.docs WHERE {match} ORDER BY id', allow_error=bool(mode and term.endswith('*')))
+                    capture(f'SELECT COUNT(*),SUM(id),MIN(id),MAX(id) FROM fts_regression.docs WHERE {match}', allow_error=bool(mode and term.endswith('*')))
+                    capture(f'SELECT note,COUNT(*),SUM(id) FROM fts_regression.docs WHERE {match} GROUP BY note HAVING COUNT(*)>2 ORDER BY note', allow_error=bool(mode and term.endswith('*')))
                     # Compare IDs and full precision scores, not only hit counts.
                     capture(f'SELECT id,{match} AS score FROM fts_regression.docs WHERE {match} ORDER BY id', allow_error=bool(mode and term.endswith('*')))
                     capture(f'SELECT id,{match} AS score FROM fts_regression.docs WHERE {match} > 0.1 AND note <> 3 ORDER BY score DESC,id LIMIT 13 OFFSET 2', allow_error=bool(mode and term.endswith('*')))
         capture("SELECT d.id FROM (SELECT 1 AS k UNION ALL SELECT 2) a JOIN fts_regression.docs d ON d.note=a.k WHERE MATCH(d.body) AGAINST('database') ORDER BY d.id")
+    # Scores referenced through aliases, expressions, grouping and ordering
+    # must never be replaced by membership weights.
+    m = "MATCH(body) AGAINST('database query')"
+    for statement in [
+        f"SELECT id,{m} AS score FROM fts_regression.docs WHERE {m} ORDER BY score DESC,id LIMIT 17",
+        f"SELECT id,{m}*7+0.25 AS score FROM fts_regression.docs WHERE {m} ORDER BY id",
+        f"SELECT ROUND({m},8),COUNT(*) FROM fts_regression.docs WHERE {m} GROUP BY ROUND({m},8) ORDER BY 1",
+        f"SELECT COUNT(*) FROM (SELECT id,{m} AS score FROM fts_regression.docs WHERE {m}) d WHERE score>0.75",
+        f"SELECT id FROM fts_regression.docs WHERE {m} ORDER BY {m} DESC,id LIMIT 17 OFFSET 3",
+        f"SELECT id FROM fts_regression.docs WHERE {m}>1 AND {m} ORDER BY id",
+        f"SELECT id FROM fts_regression.docs WHERE {m} AND NOT ({m}>100) ORDER BY id",
+        "SELECT id FROM fts_regression.docs WHERE MATCH(body) AGAINST('') ORDER BY id",
+        "SELECT id FROM fts_regression.docs WHERE MATCH(body) AGAINST(NULL) ORDER BY id",
+        "SELECT id FROM fts_regression.docs WHERE MATCH(body) AGAINST('the and') ORDER BY id",
+        "SELECT id FROM fts_regression.docs WHERE MATCH(body) AGAINST('database') OR note=1 ORDER BY id",
+        "SELECT id FROM fts_regression.docs WHERE NOT MATCH(body) AGAINST('database') ORDER BY id",
+        "SELECT id FROM fts_regression.docs WHERE MATCH(body) AGAINST('database') AND id<50 ORDER BY id",
+        "SELECT COUNT(*) FROM (SELECT id FROM fts_regression.docs WHERE MATCH(body) AGAINST('database') LIMIT 20 OFFSET 3) d",
+        "SELECT a.k,(SELECT COUNT(*) FROM fts_regression.docs d WHERE d.note=a.k AND MATCH(d.body) AGAINST('database')) FROM (SELECT 1 AS k UNION ALL SELECT 2 UNION ALL SELECT 5) a ORDER BY a.k",
+        "PREPARE ft FROM 'SELECT id FROM fts_regression.docs WHERE MATCH(body) AGAINST(?) ORDER BY id'; SET @q='database'; EXECUTE ft USING @q; SET @q='notpresent'; EXECUTE ft USING @q; SET @q='query'; EXECUTE ft USING @q; DEALLOCATE PREPARE ft",
+    ]:
+        capture(statement)
+
+    # More than 256 unique search terms uses the spill/hash path. Multiple
+    # terms hit each document, including duplicate query words and empty rows.
+    long_words = ['word' + chr(97+i//26) + chr(97+i%26) for i in range(300)]
+    sql('CREATE TABLE fts_regression.long_queries(id INT PRIMARY KEY, body TEXT, FULLTEXT INDEX ft(body) WITH PARSER space)')
+    docs = [' '.join(long_words), ' '.join(long_words[:120]), ' '.join(long_words[120:]), '', None]
+    sql('INSERT INTO fts_regression.long_queries VALUES ' + ','.join(
+        f"({i}," + ('NULL' if text is None else literal(text)) + ')' for i,text in enumerate(docs,1)))
+    for text in [' '.join(long_words), ' '.join(long_words+long_words[:20]), ' '.join(long_words[::-1])]:
+        match = f"MATCH(body) AGAINST({literal(text)})"
+        capture(f"SELECT id FROM fts_regression.long_queries WHERE {match} ORDER BY id")
+        capture(f"SELECT COUNT(*),SUM(id) FROM fts_regression.long_queries WHERE {match}")
+    if args.expect_filter_only:
+        cases = [
+            (f"SELECT COUNT(*) FROM fts_regression.docs WHERE {m}", False),
+            (f"SELECT id FROM fts_regression.docs WHERE {m} ORDER BY id", False),
+            (f"SELECT id,{m} FROM fts_regression.docs WHERE {m} ORDER BY id", True),
+            (f"SELECT id FROM fts_regression.docs WHERE {m}", True),
+            (f"SELECT id FROM fts_regression.docs WHERE {m} LIMIT 20", True),
+            (f"SELECT id FROM fts_regression.docs WHERE {m}>0.1 ORDER BY id", True),
+            (f"SELECT id FROM fts_regression.docs WHERE {m} ORDER BY {m} DESC,id", True),
+            ("SELECT id FROM fts_regression.docs WHERE MATCH(body) AGAINST('database' IN BOOLEAN MODE) ORDER BY id", True),
+        ]
+        for statement, scores in cases:
+            plan = sql('EXPLAIN EXTENDED ' + statement)
+            expected = 'calc_relevance=' + str(scores).lower()
+            if (not scores and expected not in plan) or (scores and 'calc_relevance=false' in plan):
+                raise AssertionError('Missing plan property ' + expected + ': ' + statement + '\n' + plan)
+    # Composite primary keys require the document-ID mapping table; score-free
+    # scans must support both that lookup and the final ordinary table lookup.
+    sql("CREATE TABLE fts_regression.mapped_docs(region VARCHAR(20),id INT,body TEXT,note INT,PRIMARY KEY(region,id),FULLTEXT INDEX ft(body) WITH PARSER space)")
+    sql("INSERT INTO fts_regression.mapped_docs VALUES ('a',1,'database query',11),('a',2,'database',22),('b',1,'query',33),('b',2,'other',44),('c',1,NULL,55)")
+    for term in ['database', 'database query', '', 'the and', 'missing']:
+        match = f"MATCH(body) AGAINST({literal(term)})"
+        capture(f"SELECT region,id,note FROM fts_regression.mapped_docs WHERE {match} ORDER BY region,id")
+        capture(f"SELECT COUNT(*),SUM(note) FROM fts_regression.mapped_docs WHERE {match}")
+    sql("UPDATE fts_regression.mapped_docs SET body='database changed' WHERE region='b' AND id=2; DELETE FROM fts_regression.mapped_docs WHERE region='a' AND id=1")
+    capture("SELECT region,id,note FROM fts_regression.mapped_docs WHERE MATCH(body) AGAINST('database') ORDER BY region,id")
+    capture("BEGIN; UPDATE fts_regression.mapped_docs SET body='rollbackword' WHERE region='b'; SELECT region,id FROM fts_regression.mapped_docs WHERE MATCH(body) AGAINST('rollbackword') ORDER BY region,id; ROLLBACK; SELECT region,id FROM fts_regression.mapped_docs WHERE MATCH(body) AGAINST('rollbackword') ORDER BY region,id")
     query_cases()
     sql("UPDATE fts_regression.docs SET body='database changed 全文分词' WHERE id%11=0; DELETE FROM fts_regression.docs WHERE id%13=0")
     capture("SELECT id FROM fts_regression.docs WHERE MATCH(body) AGAINST('changed') ORDER BY id")
