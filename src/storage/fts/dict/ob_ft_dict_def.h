@@ -41,12 +41,8 @@ public:
   ObFTSingleWord &operator=(const ObFTSingleWord &other) = default;
 
   int32_t set_word(const char *word, int32_t word_len);
-  ObString get_word() const { return ObString(word_len, word); }
-  bool operator==(const ObFTSingleWord &other) const
-  {
-    return this == &other
-        || (word_len == other.word_len && 0 == memcmp(word, other.word, word_len));
-  }
+  ObString get_word() const;
+  bool operator==(const ObFTSingleWord &other) const;
 
 public:
   char word[common::ObCharset::MAX_MB_LEN];

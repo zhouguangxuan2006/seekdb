@@ -15,7 +15,6 @@
  */
 
 #define USING_LOG_PREFIX SQL_OPT
-#include "sql/resolver/dml/ob_stmt_expr_visitor.h"
 #include "config_bridge.h"
 #include "ob_log_plan.h"
 #include "sql/optimizer/ob_pwj_comparer.h"
@@ -11988,61 +11987,6 @@ int ObLogPlan::construct_startup_filter_for_limit(ObRawExpr *limit_expr, ObLogic
   return ret;
 }
 
-// Natural-language BM25 gives every matching posting a positive weight. A
-// bare WHERE MATCH therefore only needs document membership, provided no other
-// clause observes the score. Check scopes separately: shared expression roots
-// can occur in both SELECT and WHERE. Keep lookup, Boolean/ES, correlated and
-// multi-table plans on their existing scoring paths.
-static int check_filter_only_match(const ObDMLStmt &stmt,
-                                   const ObMatchFunRawExpr &match,
-                                   const ObRawExpr &predicate,
-                                   bool &filter_only)
-{
-  int ret = OB_SUCCESS;
-  filter_only = false;
-  if (!stmt.is_select_stmt() || stmt.get_table_items().count() != 1 || stmt.has_subquery()
-      || match.is_es_match() || match.get_mode_flag() != NATURAL_LANGUAGE_MODE
-      || match.has_flag(CNT_DYNAMIC_PARAM)
-      || predicate.get_expr_type() != T_OP_BOOL || predicate.get_param_count() != 1
-      || predicate.get_param_expr(0) != &match) {
-    // Preserve score semantics for all other forms, including thresholds.
-  } else {
-    ObStmtExprGetter visitor;
-    visitor.set_relation_scope();
-    visitor.remove_scope(SCOPE_WHERE);
-    ObSEArray<ObRawExpr *, 16> expressions;
-    bool score_observed = false;
-    bool found_predicate = false;
-    if (OB_FAIL(stmt.get_relation_exprs(expressions, visitor))) {
-    }
-    for (int64_t i = 0; OB_SUCC(ret) && !score_observed && i < expressions.count(); ++i) {
-      if (OB_ISNULL(expressions.at(i))) {
-        ret = OB_ERR_UNEXPECTED;
-      } else {
-        score_observed = expressions.at(i)->has_flag(IS_MATCH_EXPR)
-                         || expressions.at(i)->has_flag(CNT_MATCH_EXPR)
-                         || expressions.at(i)->has_flag(IS_DYNAMIC_PARAM)
-                         || expressions.at(i)->has_flag(CNT_DYNAMIC_PARAM);
-      }
-    }
-    const ObIArray<ObRawExpr *> &conditions = stmt.get_condition_exprs();
-    for (int64_t i = 0; OB_SUCC(ret) && !score_observed && i < conditions.count(); ++i) {
-      if (OB_ISNULL(conditions.at(i))) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (conditions.at(i) == &predicate) {
-        found_predicate = true;
-      } else {
-        score_observed = conditions.at(i)->has_flag(IS_MATCH_EXPR)
-                         || conditions.at(i)->has_flag(CNT_MATCH_EXPR)
-                         || conditions.at(i)->has_flag(IS_DYNAMIC_PARAM)
-                         || conditions.at(i)->has_flag(CNT_DYNAMIC_PARAM);
-      }
-    }
-    filter_only = OB_SUCC(ret) && found_predicate && !score_observed;
-  }
-  return ret;
-}
-
 int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_match_exprs,
                                            const ObIArray<ObRawExpr *> &scan_match_filters,
                                            const ObIArray<ObRawExpr *> &all_match_filters,
@@ -12095,20 +12039,12 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
     ObTextRetrievalInfo &tr_info = table_scan->get_text_retrieval_info();
     tr_info.match_expr_ = match_against;
     tr_info.pushdown_match_filter_ = match_pred;
-    bool filter_only = false;
-    if (OB_FAIL(check_filter_only_match(*get_stmt(), *match_against, *match_pred, filter_only))) {
-    } else if (filter_only) {
-      // Membership is already established by the posting-list merge.
-      tr_info.need_calc_relevance_ = false;
-      tr_info.pushdown_match_filter_ = nullptr;
-    }
     // The mapping table is absent when the data-table rowkey is used as the document ID.
     table_scan->set_doc_id_index_table_id(tr_info.doc_id_idx_tid_);
     if (table_scan->is_vec_adaptive_scan() || table_scan->is_vec_idx_scan_post_filter()) {
       table_scan->set_rowkey_doc_table_id(tr_info.rowkey_idx_tid_);
     }
-    if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.doc_id_idx_tid_ == OB_INVALID_ID))) {
+    if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.doc_id_idx_tid_ == OB_INVALID_ID))) {
     } else if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.rowkey_idx_tid_ == OB_INVALID_ID))) {
     }
   }

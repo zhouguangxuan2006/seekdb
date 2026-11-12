@@ -32,13 +32,8 @@ int ObTextTaaTIter::init(const ObTextTaaTParam &param)
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(CURRENT_CONTEXT->CREATE_CONTEXT(mem_context_, mem_param))) {
   } else if (OB_FAIL(ObSRTaaTIterImpl::init(*param.base_param_, *param.dim_iter_, *param.allocator_))) {
-  } else if (param.base_param_->relevance_expr_ != nullptr &&
-             OB_FAIL(bm25_param_estimator_.init(param.bm25_param_est_ctx_))) {
+  } else if (OB_FAIL(bm25_param_estimator_.init(param.bm25_param_est_ctx_))) {
   } else {
-    // Score-free long queries still need bounded spill partitions for dedup.
-    if (param.base_param_->relevance_expr_ == nullptr) {
-      partition_cnt_ = OB_MAX_HASHMAP_COUNT;
-    }
     query_tokens_ = param.query_tokens_;
     mode_flag_ = param.mode_flag_;
     function_lookup_mode_ = param.function_lookup_mode_;
