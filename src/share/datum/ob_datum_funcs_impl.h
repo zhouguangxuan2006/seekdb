@@ -171,61 +171,10 @@ struct ObNullSafeDatumStrCmp
       cmp_ret = NULL_FIRST ? -1 : 1;
     } else if (OB_UNLIKELY(r.is_null())) {
       cmp_ret = NULL_FIRST ? 1 : -1;
-    } else if (CS_TYPE == CS_TYPE_UTF8MB4_GENERAL_CI && l.len_ == r.len_
-               && (l.len_ == 0 || (l.ptr_ != nullptr && r.ptr_ != nullptr
-                   && (l.ptr_ == r.ptr_ || 0 == MEMCMP(l.ptr_, r.ptr_, l.len_))))) {
-      // Identical bytes have identical collation weights, including trailing
-      // spaces. Repeated string keys need no Unicode decoding; other ties
-      // retain the original collation rules.
-      cmp_ret = 0;
-    } else if (CS_TYPE == CS_TYPE_UTF8MB4_GENERAL_CI && compare_ascii_prefix(l, r, cmp_ret)) {
-      // ASCII weights and the original padding rule determine the comparison.
     } else {
       ret = datum_cmp::ObDatumStrCmp<CS_TYPE, WITH_END_SPACE>::cmp(l, r, cmp_ret);
     }
     return ret;
-  }
-private:
-  static inline bool compare_ascii_prefix(const ObDatum &l, const ObDatum &r, int &cmp_ret)
-  {
-    if (l.ptr_ == nullptr || r.ptr_ == nullptr) {
-      return false;
-    }
-    const int64_t len = MIN(l.len_, r.len_);
-    for (int64_t i = 0; i < len; ++i) {
-      unsigned char left = static_cast<unsigned char>(l.ptr_[i]);
-      unsigned char right = static_cast<unsigned char>(r.ptr_[i]);
-      if ((left | right) >= 0x80) {
-        return false;
-      }
-      // utf8mb4_general_ci's ASCII weights are the byte value except a-z,
-      // whose weight is A-Z (utf8_plane00 in ob_ctype_utf8_tab.h).
-      if (left >= 'a' && left <= 'z') left -= 'a' - 'A';
-      if (right >= 'a' && right <= 'z') right -= 'a' - 'A';
-      if (left != right) {
-        cmp_ret = left < right ? -1 : 1;
-        return true;
-      }
-    }
-    // Both common prefixes are ASCII with equal weights. This is exactly
-    // the byte-tail rule in ob_strnncollsp_utf8mb4_help: with end-space
-    // significance the longer tail wins; otherwise compare the first
-    // non-space byte with padding. No Unicode decoding occurs in that tail.
-    if (l.len_ == r.len_) {
-      cmp_ret = 0;
-    } else {
-      const int sign = l.len_ > r.len_ ? 1 : -1;
-      if (WITH_END_SPACE) {
-        cmp_ret = sign;
-      } else {
-        const ObDatum &longer = l.len_ > r.len_ ? l : r;
-        int64_t i = len;
-        while (i < longer.len_ && longer.ptr_[i] == ' ') ++i;
-        cmp_ret = i == longer.len_ ? 0
-            : static_cast<unsigned char>(longer.ptr_[i]) < ' ' ? -sign : sign;
-      }
-    }
-    return true;
   }
 };
 

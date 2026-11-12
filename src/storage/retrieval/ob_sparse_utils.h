@@ -28,23 +28,18 @@ struct ObFtsEvalNode;
 namespace storage
 {
 
-struct ObSRDaaTInnerProductRelevanceCollector;
-
 struct ObSRDaaTRelevanceCollector
 {
   ObSRDaaTRelevanceCollector() {}
   virtual ~ObSRDaaTRelevanceCollector() {}
 
-  // Return a concrete view only for the final sum collector. Other collectors
-  // keep the generic path, without relying on query mode or an unchecked cast.
-  virtual ObSRDaaTInnerProductRelevanceCollector *as_inner_product() { return nullptr; }
   virtual void reset() = 0;
   virtual void reuse() = 0;
   virtual int collect_one_dim(const int64_t dim_idx, const double relevance) = 0;
   virtual int get_result(double &relevance, bool &is_valid) = 0;
 };
 
-struct ObSRDaaTInnerProductRelevanceCollector final : ObSRDaaTRelevanceCollector
+struct ObSRDaaTInnerProductRelevanceCollector : ObSRDaaTRelevanceCollector
 {
   ObSRDaaTInnerProductRelevanceCollector() : ObSRDaaTRelevanceCollector(),
       total_relevance_(0),
@@ -52,24 +47,11 @@ struct ObSRDaaTInnerProductRelevanceCollector final : ObSRDaaTRelevanceCollector
       should_match_(0) {}
   virtual ~ObSRDaaTInnerProductRelevanceCollector() {};
 
-  ObSRDaaTInnerProductRelevanceCollector *as_inner_product() override { return this; }
   int init(int64_t should_match = 0);
   virtual void reset() override;
   virtual void reuse() override;
-  int collect_one_dim(const int64_t, const double relevance) override
-  {
-    total_relevance_ += relevance;
-    ++matched_cnt_;
-    return common::OB_SUCCESS;
-  }
-  int get_result(double &relevance, bool &is_valid) override
-  {
-    relevance = total_relevance_;
-    is_valid = matched_cnt_ >= should_match_;
-    total_relevance_ = 0.0;
-    matched_cnt_ = 0;
-    return common::OB_SUCCESS;
-  }
+  virtual int collect_one_dim(const int64_t dim_idx, const double) override;
+  virtual int get_result(double &relevance, bool &is_valid) override;
 private:
   double total_relevance_;
   int64_t matched_cnt_;

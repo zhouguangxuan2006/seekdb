@@ -76,18 +76,6 @@ public:
   // interface for daat processing
   virtual int get_curr_score(double &score) const = 0;
   virtual int get_curr_id(const ObDatum *&datum) const = 0;
-  // Fetch a complete posting in one dispatch. The default preserves the three
-  // existing calls; buffered implementations can inline them as one hot path.
-  virtual int get_next_posting(double &score, const ObDatum *&datum)
-  {
-    int ret = get_next_row();
-    if (OB_SUCC(ret)) {
-      if (OB_FAIL(get_curr_score(score))) {
-      } else if (OB_FAIL(get_curr_id(datum))) {
-      }
-    }
-    return ret;
-  }
   // interface for plain dynamic pruning algorithms such as WAND and MaxScore
   virtual int get_dim_max_score(double &score)
   {
