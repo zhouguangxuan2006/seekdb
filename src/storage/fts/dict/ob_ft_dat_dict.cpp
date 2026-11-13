@@ -127,12 +127,6 @@ int ObFTDATBuilder<DATA_TYPE>::build_from_trie(ObFTTrie<DATA_TYPE> &trie)
               child_code = child_index.child_->dat_build_info_.code_;
               if (check[try_base + child_code] != 0) {
                 conflict = true;
-                // The first pass still assigns every child's code. Later
-                // passes only test occupancy, so one conflict rejects this
-                // candidate base without scanning the remaining siblings.
-                if (!need_code) {
-                  break;
-                }
               }
             }
           }
@@ -316,10 +310,7 @@ int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
       ret = OB_SUCCESS;
       break;
     } else {
-      index += 3;
-      if (index >= header_.capacity_) {
-        index -= header_.capacity_;
-      }
+      index = (index + 3) % header_.capacity_;
     }
   }
   return ret;
@@ -331,10 +322,7 @@ int ObArrayHashMap::insert(const ObString &key, ObFTWordCode code)
   uint64_t hash = key.hash();
   uint64_t index = hash % header_.capacity_;
   while (header_.data[index].used) {
-    index += 3;
-    if (index >= header_.capacity_) {
-      index -= header_.capacity_;
-    }
+    index = (index + 3) % header_.capacity_;
   }
 
   header_.data[index].code = code;

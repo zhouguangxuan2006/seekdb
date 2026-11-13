@@ -82,11 +82,7 @@ public:
 
 private:
   static const int64_t DEFAULT_STOPWORD_BUCKET_NUM = 37L;
-  // Built during ObServer::init_fts before request processing starts, and
-  // destroyed after workers stop. The dictionary is immutable between those
-  // lifecycle boundaries, so concurrent lookups do not need bucket locks.
-  typedef common::hash::ObHashSet<storage::ObFTWord,
-      common::hash::NoPthreadDefendMode> StopWordSet;
+  typedef common::hash::ObHashSet<storage::ObFTWord> StopWordSet;
 
   StopWordSet stopword_set_;
   ObObjMeta stopword_type_;
